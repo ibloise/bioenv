@@ -10,6 +10,7 @@ from bioenv import __version__
 from bioenv.config import DEFAULT_CONFIG, ConfigError, load_config
 from bioenv.manager import (
     ENVIRONMENT_BIN,
+    MICROMAMBA_ROOT_ENV,
     BioenvError,
     check,
     install,
@@ -82,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'install':
             command, launchers = install(config, tool, dry_run=args.dry_run)
             if args.dry_run:
+                print(f'{MICROMAMBA_ROOT_ENV}={shlex.quote(config["settings"]["mamba_root"])}')
                 print('Micromamba: ' + shlex.join(command))
                 for launcher in launchers:
                     print('Publish: ' + launcher)
