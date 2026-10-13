@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bioenv"
+version = "0.1.0"
+description = "Lightweight manager for shared Micromamba bioinformatics environments"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["PyYAML>=6,<7"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: Console",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.9", "build>=1"]
+
+[project.scripts]
+bioenv = "bioenv.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bioenv*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

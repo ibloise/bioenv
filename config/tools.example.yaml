@@ -1,0 +1,35 @@
+# Example catalog. Do not assume commands here install tools yet.
+# Live catalog will be /etc/bioenv/tools.yaml.
+settings:
+  envs_root: /opt/bioinformatics/envs
+  bin_dir: /usr/local/bin
+  databases_root: /mnt/2TB_HD/Databases
+
+tools:
+  bakta:
+    package: bakta
+    version: "1.12.1"
+    python: "3.12"
+    commands:
+      - bakta
+      - bakta_db
+    environment:
+      BAKTA_DB: /mnt/2TB_HD/Databases/bakta/db
+    databases:
+      - name: full
+        path: /mnt/2TB_HD/Databases/bakta/db
+        required: true
+        # DB installation will be manual or explicitly invoked in a later version.
+
+  spades:
+    package: spades
+    commands:
+      - spades
+      - spades.py
+
+  kraken2:
+    package: kraken2
+    commands:
+      - kraken2
+      - kraken2-build
+      - kraken2-inspect
