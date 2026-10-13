@@ -3,6 +3,8 @@
 settings:
   envs_root: /opt/bioinformatics/envs
   bin_dir: /usr/local/bin
+  micromamba: /usr/local/bin/micromamba
+  mamba_root: /opt/bioinformatics
   databases_root: /mnt/2TB_HD/Databases
 
 tools:
