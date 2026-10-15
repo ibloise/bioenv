@@ -3,9 +3,8 @@
 A small Python CLI for managing shared Micromamba bioinformatics tools on a multiuser
 Linux workstation.
 
-**Status: 0.2.0.** The CLI validates and inspects the catalog, creates tool environments,
-publishes selected launchers, and checks installations. `update` and `remove` are not
-implemented.
+**Status: 0.3.0.** The CLI validates and inspects the catalog, creates, updates and removes
+tool environments, publishes selected launchers, and checks installations.
 
 ## Developer quick start
 
@@ -33,21 +32,64 @@ environment before running `pip`, if needed.
 - `bioenv check TOOL` verifies the environment, current managed launchers, and configured
   databases. Missing optional databases pass; missing required databases fail.
 - `bioenv install TOOL` creates the environment and publishes only declared commands.
+- `bioenv update TOOL` updates the installed package to the catalog version, or asks
+  Micromamba to resolve it without an explicit package version when none is declared.
+- `bioenv update TOOL --latest` ignores the catalog package version pin for this operation
+  and lets Micromamba resolve the newest version compatible with configured channels,
+  platform and dependency constraints. It does not query an external version service.
 - `bioenv publish TOOL` publishes commands from an existing environment after checking
   that each configured executable is present.
+- `bioenv remove TOOL` removes the declared environment and its current bioenv launchers.
+  It requires interactive confirmation unless `--yes` is supplied.
+- `bioenv remove TOOL --launchers-only` removes only the declared launchers and keeps the
+  environment. `--dry-run` displays the planned Micromamba operation when applicable,
+  launchers, missing resources and any conflicts without changing files or prompting.
+
+```bash
+bioenv --config /etc/bioenv/tools.yaml update fastqc --dry-run
+bioenv --config /etc/bioenv/tools.yaml update fastqc --latest --dry-run
+sudo bioenv --config /etc/bioenv/tools.yaml update fastqc
+bioenv --config /etc/bioenv/tools.yaml remove fastqc --dry-run
+sudo bioenv --config /etc/bioenv/tools.yaml remove fastqc
+sudo bioenv --config /etc/bioenv/tools.yaml remove fastqc --launchers-only --yes
+```
+
+Declaring a tool in the administrator-controlled catalog grants bioenv authority to
+administer the matching `<envs_root>/<tool>` prefix, including environments originally
+created outside bioenv. Removal uses `micromamba env remove`; it never recursively deletes
+an environment directory itself. Launcher cleanup happens only after Micromamba succeeds,
+and only for unchanged launchers carrying the matching bioenv marker. Foreign, modified,
+symlinked, or other-tool launchers block removal. If Micromamba fails, launchers are kept;
+if launcher cleanup fails after the environment is gone, the error lists the launchers still
+pending cleanup. The operation is not atomic and bioenv does not roll back or rebuild a
+partially removed environment. Use `--dry-run` to review the plan, and `--yes` only when
+the displayed resources are the intended target.
 
 `install --dry-run` reports the Micromamba command and planned launchers without changing
 the filesystem. `publish --dry-run` validates the existing environment and reports the
-launchers without writing them. `install` refuses an existing prefix; inspect it with
+launchers without writing them. `update --dry-run` runs Micromamba's solver simulation and
+shows its proposed transaction; Micromamba may refresh package metadata in its cache.
+`install` refuses an existing prefix; inspect it with
 `check` and use `publish` only if it is the intended environment.
 
+Updates are in place and have no automatic rollback. If Micromamba or post-update checks
+fail, inspect the environment before taking further action. A requested catalog version and
+the version ultimately installed can differ when no version is pinned or when `--latest` is
+used. `--latest` means newest version the configured solver can install, not necessarily the
+newest version published for every platform. The solver can reject unavailable packages or
+incompatible dependency constraints; bioenv does not rebuild environments to work around
+those constraints. `update` requires an existing Conda environment containing the declared
+package and never creates one.
+
 The live catalog is separate from the installed package, at `/etc/bioenv/tools.yaml`.
-The example catalog is at `config/tools.example.yaml`. The catalog selects executable
-paths and environment variables, so privileged operations must use a catalog and
+Set `BIOENV_CONFIG` to choose a default catalog path; an explicit `--config` takes
+precedence. The example catalog is at `config/tools.example.yaml`. The catalog selects
+executable paths and environment variables, so privileged operations must use a catalog and
 Micromamba installation controlled by an administrator. Read-only commands do not need
-root; `install` and `publish` need write access to their configured paths. A system-wide
-pipx installation is the intended deployment route; do not use `sudo pip` into Ubuntu's
-system Python or install a privileged release from a writable development directory.
+root; `install`, `update`, `publish` and `remove` need write access to their configured
+paths. A system-wide pipx installation is the intended deployment route; do not use
+`sudo pip` into Ubuntu's system Python or install a privileged release from a writable
+development directory.
 For example, after that deployment, an administrator can run
 `sudo bioenv --config /etc/bioenv/tools.yaml install bakta`. The catalog, its parent
 directory, configured Micromamba executable, and destination directories must be
@@ -55,8 +97,8 @@ controlled by administrators before using `sudo`.
 
 ## Runtime dependencies and directories
 
-The Python package requires Python 3.10 or newer and installs PyYAML. `install` also
-requires an executable Micromamba at `settings.micromamba`; published launchers invoke
+The Python package requires Python 3.10 or newer and installs PyYAML. `install` and
+`update` require an executable Micromamba at `settings.micromamba`; published launchers invoke
 that same executable every time they run, through `/bin/sh`. Micromamba is a separate
 system dependency, not installed by `pip` or `pipx`. It needs access to its configured
 package channels, either through the network or an existing package cache. Its root
@@ -69,8 +111,8 @@ and file, and prepare the shared storage paths with appropriate ownership and ac
 - `/etc/bioenv/` and `/etc/bioenv/tools.yaml` (or the path passed with `--config`) must
   exist and be readable by the operator.
 - `settings.mamba_root` and `settings.envs_root` must be writable by the account running
-  `install`. With the example settings these are `/opt/bioinformatics` and
-  `/opt/bioinformatics/envs`. Create these shared parent directories before installation
+  `install`, `update` or `remove`. With the example settings these are `/opt/bioinformatics`
+  and `/opt/bioinformatics/envs`. Create these shared parent directories before installation
   and grant write access to the administrator running it. Micromamba creates tool
   prefixes and its package cache under these locations.
 - `settings.bin_dir` must be writable by the account running `publish`. `bioenv` tries
@@ -95,6 +137,9 @@ and file, and prepare the shared storage paths with appropriate ownership and ac
 - If Micromamba fails, it may leave an incomplete environment. Inspect the target before
   retrying. If environment creation succeeds but publishing fails, fix the reported
   issue and rerun `publish`.
+- `install`, `update` and `remove` use a per-tool Linux file lock to avoid simultaneous bioenv
+  mutations of one environment. Micromamba commands run outside bioenv do not honor this
+  lock and can still modify the same prefix concurrently.
 
 ## Design constraints
 

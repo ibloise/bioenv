@@ -97,14 +97,22 @@ def _validated_settings(value):
 
 
 def _validate_commands(name, value, claimed_commands):
-    if not isinstance(value, list) or not value or any(
-        not isinstance(command, str)
-        or not NAME.fullmatch(command)
-        or command in ('.', '..')
-        for command in value
-    ) or len(set(value)) != len(value):
-        raise ConfigError(f'Tool {name!r} needs a unique, non-empty list of commands')
-    for command in value:
+    if isinstance(value, list):
+        if not value or any(not isinstance(command, str) for command in value) \
+                or len(set(value)) != len(value):
+            raise ConfigError(f'Tool {name!r} needs unique, non-empty commands')
+        commands = {command: command for command in value}
+    elif isinstance(value, dict) and value:
+        commands = value
+    else:
+        raise ConfigError(f'Tool {name!r} needs a non-empty list or mapping of commands')
+    for public, executable in commands.items():
+        for command in (public, executable):
+            if not isinstance(command, str) or not NAME.fullmatch(command) or command in ('.', '..'):
+                raise ConfigError(
+                    f'Tool {name!r} commands must be simple names inside environment bin'
+                )
+    for command in commands:
         if command in claimed_commands:
             raise ConfigError(
                 f'Command {command!r} belongs to both {claimed_commands[command]} and {name}'

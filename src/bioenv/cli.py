@@ -13,9 +13,14 @@ from bioenv.manager import (
     MICROMAMBA_ROOT_ENV,
     BioenvError,
     check,
+    command_map,
     install,
     paths,
     publish,
+    plan_update,
+    remove,
+    remove_plan,
+    update,
 )
 
 
@@ -24,7 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog='bioenv', description='Manage shared Micromamba bioinformatics environments.'
     )
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
-    parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG, help='YAML catalog path')
+    parser.add_argument(
+        '--config', type=Path, default=Path(os.environ.get('BIOENV_CONFIG', DEFAULT_CONFIG)),
+        help='YAML catalog path',
+    )
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('list', help='List tools declared in catalog')
     for name, help_text in (
@@ -32,12 +40,22 @@ def build_parser() -> argparse.ArgumentParser:
         ('inspect', 'List executable files in tool environment/bin'),
         ('check', 'Check environment, launchers and databases'),
         ('install', 'Create environment and publish selected commands'),
+        ('update', 'Update an installed tool in place'),
         ('publish', 'Publish commands from an existing environment'),
+        ('remove', 'Remove a tool environment and its managed launchers'),
     ):
         sub = commands.add_parser(name, help=help_text)
         sub.add_argument('tool', help='Tool identifier from catalog')
-        if name in ('install', 'publish'):
+        if name in ('install', 'publish', 'update', 'remove'):
             sub.add_argument('--dry-run', action='store_true', help='Show actions without changes')
+        if name == 'update':
+            sub.add_argument(
+                '--latest', action='store_true', help='Ignore the catalog package version pin'
+            )
+        if name == 'remove':
+            sub.add_argument('--launchers-only', action='store_true',
+                             help='Remove launchers while keeping the environment')
+            sub.add_argument('--yes', action='store_true', help='Skip confirmation prompt')
     commands.add_parser('validate', help='Validate YAML catalog')
     return parser
 
@@ -52,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == 'list':
             for name, spec in sorted(tools.items()):
-                print(f"{name}\t{spec['package']}\t{', '.join(spec['commands'])}")
+                print(f"{name}\t{spec['package']}\t{', '.join(command_map(spec))}")
             return 0
         if args.tool not in tools:
             raise ConfigError(f'Unknown tool: {args.tool}')
@@ -65,7 +83,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Version requested: {spec['version']}")
             if 'python' in spec:
                 print(f"Python requested: {spec['python']}")
-            print(f"Commands: {', '.join(spec['commands'])}\nLaunchers: {bin_dir}")
+            commands = command_map(spec)
+            print(f"Commands: {', '.join(commands)}\nLaunchers: {bin_dir}")
+            aliases = [f'{public} -> {executable}' for public, executable in commands.items()
+                       if public != executable]
+            if aliases:
+                print(f"Executable aliases: {', '.join(aliases)}")
             for key, value in spec.get('environment', {}).items():
                 print(f'Environment: {key}={value}')
         elif args.command == 'inspect':
@@ -74,7 +97,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise BioenvError(f'No environment bin directory: {bindir}')
             for p in sorted(bindir.iterdir()):
                 if p.is_file() and os.access(p, os.X_OK):
-                    print(p.name)
+                    declared = [public for public, executable in command_map(spec).items()
+                                if executable == p.name]
+                    suffix = f" (launcher: {', '.join(declared)})" if declared else ''
+                    print(p.name + suffix)
         elif args.command == 'check':
             results = check(config, tool)
             for ok, label in results:
@@ -89,10 +115,81 @@ def main(argv: list[str] | None = None) -> int:
                     print('Publish: ' + launcher)
             else:
                 print(f'Installed {tool} in {prefix}')
+        elif args.command == 'update':
+            command, launchers = plan_update(config, tool, latest=args.latest)
+            mode = 'latest resolvable' if args.latest else 'catalog specification'
+            spec_version = (
+                'ignored (--latest)' if args.latest else spec.get('version', 'not pinned')
+            )
+            print(f'Tool: {tool}')
+            print(f'Environment: {prefix}')
+            print(f'Package: {spec["package"]}')
+            print(f'Catalog version: {spec_version}')
+            print(f'Mode: {mode}')
+            print(f'Operation: {shlex.join(command)}')
+            if args.dry_run:
+                print('Micromamba solver simulation (--dry-run):')
+            _, launchers, installed_version = update(
+                config, tool, latest=args.latest, dry_run=args.dry_run,
+            )
+            if args.dry_run:
+                for launcher in launchers:
+                    print(f'Would synchronize launcher: {launcher}')
+                print('Solver simulation completed; no environment or launcher changes were made.')
+            else:
+                version_text = f' ({installed_version})' if installed_version else ''
+                print(f'Updated {tool}{version_text} in {prefix}')
         elif args.command == 'publish':
             launchers = publish(config, tool, dry_run=args.dry_run)
             for launcher in launchers:
                 print(f"{'Would publish' if args.dry_run else 'Published'}: {launcher}")
+        elif args.command == 'remove':
+            plan = remove_plan(config, tool, launchers_only=args.launchers_only)
+            print(f'Tool: {tool}')
+            print(f'Environment: {prefix}' + (
+                ' (preserved by --launchers-only)' if args.launchers_only else ''
+            ))
+            if not args.launchers_only:
+                if plan['command']:
+                    print('Micromamba: ' + shlex.join(plan['command']))
+                elif not plan['environment_exists']:
+                    print('Environment: already absent; no environment removal will be attempted')
+            print('Launchers:')
+            for launcher, state in plan['launchers']:
+                print(f'  {launcher} ({state})')
+            if plan['blocked']:
+                print('Removal blocked by launcher conflicts.', file=sys.stderr)
+                return 2
+            if args.dry_run:
+                print('Dry run: no environment or launcher changes were made.')
+                return 0
+            if not args.launchers_only and not plan['environment_exists']:
+                print(f'Environment for {tool} was already absent; no resources were removed.')
+                return 0
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    raise BioenvError(
+                        'Removal requires an interactive terminal; rerun with --yes to confirm.'
+                    )
+                action = 'Remove these launchers and keep the environment?' if args.launchers_only \
+                    else 'Remove this environment and its managed launchers?'
+                try:
+                    answer = input(f'{action} [y/N] ')
+                except EOFError as exc:
+                    raise BioenvError('No confirmation received; removal cancelled.') from exc
+                except KeyboardInterrupt:
+                    print('\nRemoval cancelled.')
+                    return 1
+                if answer.strip().casefold() not in ('y', 'yes'):
+                    print('Removal cancelled.')
+                    return 1
+            result = remove(config, tool, launchers_only=args.launchers_only)
+            if args.launchers_only:
+                print(f'Removed managed launchers for {tool}; environment was preserved.')
+            elif result['environment_exists']:
+                print(f'Removed environment and managed launchers for {tool}.')
+            else:
+                print(f'Environment for {tool} was already absent; no resources were removed.')
         return 0
     except (ConfigError, BioenvError) as exc:
         print(f'bioenv: {exc}', file=sys.stderr)

@@ -1,0 +1,13 @@
+settings:
+  envs_root: /home/ivan/.local/share/bioenv/envs
+  bin_dir: /home/ivan/.local/bin
+  micromamba: /usr/local/bin/micromamba
+  mamba_root: /home/ivan/.local/share/bioenv/mamba
+  databases_root: /home/ivan/.local/share/bioenv/databases
+
+tools:
+  fastqc:
+    package: fastqc
+    version: "0.12.1"
+    commands:
+      - fastqc
