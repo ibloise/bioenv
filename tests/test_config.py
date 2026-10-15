@@ -5,7 +5,6 @@ import pytest
 from bioenv.cli import main
 from bioenv.config import ConfigError, load_config
 
-
 EXAMPLE = Path(__file__).resolve().parents[1] / "config" / "tools.example.yaml"
 
 
@@ -13,6 +12,9 @@ def test_example_catalog():
     config = load_config(EXAMPLE)
     assert config["tools"]["bakta"]["environment"]["BAKTA_DB"].endswith("/db")
     assert "kraken2-build" in config["tools"]["kraken2"]["commands"]
+    assert config["tools"]["spades"]["commands"] == {
+        "spades": "spades.py", "spades.py": "spades.py",
+    }
 
 
 def test_alias_mapping_is_accepted_and_legacy_list_is_preserved(tmp_path):

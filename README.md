@@ -35,14 +35,18 @@ environment before running `pip`, if needed.
 - `bioenv update TOOL` updates the installed package to the catalog version, or asks
   Micromamba to resolve it without an explicit package version when none is declared.
 - `bioenv update TOOL --latest` ignores the catalog package version pin for this operation
-  and lets Micromamba resolve the newest version compatible with configured channels,
-  platform and dependency constraints. It does not query an external version service.
+  and asks Micromamba to resolve an update under configured channels, platform and
+  dependency constraints. It does not check the highest version published or query an
+  external version service. If Micromamba
+  succeeds without changing the main package version, bioenv reports success and the
+  unchanged version; dependency updates may still have been applied.
 - `bioenv publish TOOL` publishes commands from an existing environment after checking
   that each configured executable is present.
 - `bioenv remove TOOL` removes the declared environment and its current bioenv launchers.
   It requires interactive confirmation unless `--yes` is supplied.
 - `bioenv remove TOOL --launchers-only` removes only the declared launchers and keeps the
-  environment. `--dry-run` displays the planned Micromamba operation when applicable,
+  environment. Use this mode to recover launchers left behind after an environment removal
+  succeeded but launcher cleanup failed. `--dry-run` displays the planned Micromamba operation when applicable,
   launchers, missing resources and any conflicts without changing files or prompting.
 
 ```bash
@@ -61,8 +65,9 @@ an environment directory itself. Launcher cleanup happens only after Micromamba 
 and only for unchanged launchers carrying the matching bioenv marker. Foreign, modified,
 symlinked, or other-tool launchers block removal. If Micromamba fails, launchers are kept;
 if launcher cleanup fails after the environment is gone, the error lists the launchers still
-pending cleanup. The operation is not atomic and bioenv does not roll back or rebuild a
-partially removed environment. Use `--dry-run` to review the plan, and `--yes` only when
+pending cleanup. Recover them with `remove TOOL --launchers-only`; bioenv will still reject
+foreign, modified or symlinked launchers. The operation is not atomic and bioenv does not
+roll back or rebuild a partially removed environment. Use `--dry-run` to review the plan, and `--yes` only when
 the displayed resources are the intended target.
 
 `install --dry-run` reports the Micromamba command and planned launchers without changing
@@ -72,11 +77,13 @@ shows its proposed transaction; Micromamba may refresh package metadata in its c
 `install` refuses an existing prefix; inspect it with
 `check` and use `publish` only if it is the intended environment.
 
-Updates are in place and have no automatic rollback. If Micromamba or post-update checks
+Updates are in place and have no automatic rollback. A changed main package version is
+reported as `old -> new`; an unchanged version is reported as successful completion with no
+main-package version change. If Micromamba or post-update checks
 fail, inspect the environment before taking further action. A requested catalog version and
 the version ultimately installed can differ when no version is pinned or when `--latest` is
-used. `--latest` means newest version the configured solver can install, not necessarily the
-newest version published for every platform. The solver can reject unavailable packages or
+used. `--latest` leaves package selection to Micromamba and does not establish the highest
+version published. The solver can reject unavailable packages or
 incompatible dependency constraints; bioenv does not rebuild environments to work around
 those constraints. `update` requires an existing Conda environment containing the declared
 package and never creates one.
@@ -99,7 +106,9 @@ controlled by administrators before using `sudo`.
 
 The Python package requires Python 3.10 or newer and installs PyYAML. `install` and
 `update` require an executable Micromamba at `settings.micromamba`; published launchers invoke
-that same executable every time they run, through `/bin/sh`. Micromamba is a separate
+that same executable every time they run, through `/bin/sh`. For SPAdes, the example catalog
+maps the public `spades` launcher to the Conda executable `spades.py`; list-based catalogs
+remain supported. Micromamba is a separate
 system dependency, not installed by `pip` or `pipx`. It needs access to its configured
 package channels, either through the network or an existing package cache. Its root
 prefix stores shared environments and cache under `settings.mamba_root`
@@ -137,9 +146,10 @@ and file, and prepare the shared storage paths with appropriate ownership and ac
 - If Micromamba fails, it may leave an incomplete environment. Inspect the target before
   retrying. If environment creation succeeds but publishing fails, fix the reported
   issue and rerun `publish`.
-- `install`, `update` and `remove` use a per-tool Linux file lock to avoid simultaneous bioenv
-  mutations of one environment. Micromamba commands run outside bioenv do not honor this
-  lock and can still modify the same prefix concurrently.
+- `install`, `update`, `publish` and `remove` use a per-tool Linux file lock to coordinate
+  bioenv mutations and launcher changes. Micromamba commands run outside bioenv do not honor
+  this lock and can still modify the same prefix concurrently. Operations are not transactional
+  and bioenv does not roll back partial environment changes.
 
 ## Design constraints
 

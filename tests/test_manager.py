@@ -1,13 +1,20 @@
-from pathlib import Path
 import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 
 from bioenv.cli import main
 from bioenv.config import ConfigError, load_config
 from bioenv.manager import (
-    BioenvError, _environment_lock, check, install, plan, plan_update, publish, update,
+    BioenvError,
+    _environment_lock,
+    check,
+    install,
+    plan,
+    plan_update,
+    publish,
+    update,
 )
 
 
@@ -90,10 +97,11 @@ def test_update_runs_in_place_and_syncs_launchers(tmp_path, monkeypatch, latest)
         record.write_text('{"name":"toolpkg","version":"2.0"}', encoding='utf-8')
 
     monkeypatch.setattr('bioenv.manager.subprocess.run', update_environment)
-    command, launchers, version = update(cfg, 'testtool', latest=latest)
+    command, launchers, old_version, version = update(cfg, 'testtool', latest=latest)
     assert command == seen['command']
     assert seen['env']['MAMBA_ROOT_PREFIX'] == cfg['settings']['mamba_root']
     assert version == '2.0'
+    assert old_version == '1.0'
     assert len(launchers) == 2
     assert all(Path(path).is_file() for path in launchers)
     assert not any(arg == '--all' for arg in command)
@@ -107,12 +115,12 @@ def test_update_dry_run_simulates_solver_without_filesystem_changes(tmp_path, mo
     monkeypatch.setattr(
         'bioenv.manager.subprocess.run', lambda command, **kwargs: calls.append(command)
     )
-    command, launchers, version = update(cfg, 'testtool', dry_run=True)
+    command, launchers, old_version, version = update(cfg, 'testtool', dry_run=True)
     after = set(tmp_path.rglob('*'))
     assert before == after
     assert calls[0][-1] == '--dry-run'
     assert '--dry-run' not in command
-    assert version == '1.0'
+    assert old_version == '1.0' and version is None
     assert all(not Path(path).exists() for path in launchers)
     assert prefix.is_dir()
 
@@ -197,15 +205,57 @@ def test_update_refuses_foreign_launcher(tmp_path, monkeypatch):
     assert foreign.read_text(encoding='utf-8') == 'foreign'
 
 
-def test_update_latest_does_not_report_success_when_solver_keeps_old_version(
+def test_update_latest_succeeds_and_syncs_launchers_when_version_is_unchanged(
     tmp_path, monkeypatch,
 ):
     _, cfg = catalog(tmp_path)
-    _installed_environment(tmp_path)
+    prefix = _installed_environment(tmp_path)
+    publish(cfg, 'testtool')
+    cfg['settings']['mamba_root'] = str(tmp_path / 'updated-root')
+    old_launcher = prefix.parent.parent / 'bin' / 'tool'
     monkeypatch.setattr('bioenv.manager.subprocess.run', lambda *args, **kwargs: None)
-    with pytest.raises(BioenvError, match='no newer resolvable version'):
-        update(cfg, 'testtool', latest=True)
-    assert not (tmp_path / 'bin').exists()
+    _, launchers, old_version, new_version = update(cfg, 'testtool', latest=True)
+    assert (old_version, new_version) == ('1.0', '1.0')
+    assert all(Path(path).is_file() for path in launchers)
+    assert old_launcher.read_text(encoding='utf-8').startswith('#!/bin/sh')
+
+
+def test_update_latest_dependency_change_with_same_package_version_succeeds(tmp_path, monkeypatch):
+    _, cfg = catalog(tmp_path)
+    prefix = _installed_environment(tmp_path)
+    (prefix / 'conda-meta' / 'dependency-1.0-0.json').write_text(
+        '{"name":"dependency","version":"1.0"}', encoding='utf-8'
+    )
+
+    def update_dependencies(command, **kwargs):
+        (prefix / 'conda-meta' / 'dependency-1.0-0.json').unlink()
+        (prefix / 'conda-meta' / 'dependency-2.0-0.json').write_text(
+            '{"name":"dependency","version":"2.0"}', encoding='utf-8'
+        )
+
+    monkeypatch.setattr('bioenv.manager.subprocess.run', update_dependencies)
+    _, _, old_version, new_version = update(cfg, 'testtool', latest=True)
+    assert (old_version, new_version) == ('1.0', '1.0')
+    assert (prefix / 'conda-meta' / 'dependency-2.0-0.json').is_file()
+
+
+def test_update_cli_reports_version_change_and_no_change(tmp_path, monkeypatch, capsys):
+    path, _cfg = catalog(tmp_path)
+    prefix = _installed_environment(tmp_path)
+    monkeypatch.setattr('bioenv.manager.subprocess.run', lambda *args, **kwargs: None)
+    assert main(['--config', str(path), 'update', 'testtool', '--latest']) == 0
+    output = capsys.readouterr().out
+    assert 'version remains 1.0' in output
+    assert 'without changing the main package version' in output
+
+    def update_package(command, **kwargs):
+        (prefix / 'conda-meta' / 'toolpkg-1.0-0.json').unlink()
+        record = prefix / 'conda-meta' / 'toolpkg-2.0-0.json'
+        record.write_text('{"name":"toolpkg","version":"2.0"}', encoding='utf-8')
+
+    monkeypatch.setattr('bioenv.manager.subprocess.run', update_package)
+    assert main(['--config', str(path), 'update', 'testtool', '--latest']) == 0
+    assert 'version 1.0 -> 2.0' in capsys.readouterr().out
 
 
 def test_environment_lock_serializes_threads(tmp_path):
@@ -239,9 +289,10 @@ def test_environment_lock_refuses_symlinked_root(tmp_path):
     real_root = tmp_path / 'real-envs'
     real_root.mkdir()
     (tmp_path / 'envs').symlink_to(real_root, target_is_directory=True)
-    with pytest.raises(BioenvError, match='through a symlink'):
-        with _environment_lock(cfg, 'testtool'):
-            pytest.fail('lock must not be acquired through a symlinked environment root')
+    with pytest.raises(BioenvError, match='through a symlink'), _environment_lock(
+        cfg, 'testtool'
+    ):
+        pytest.fail('lock must not be acquired through a symlinked environment root')
     assert not (real_root / '.bioenv-locks').exists()
 
 

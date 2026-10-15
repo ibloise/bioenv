@@ -3,11 +3,11 @@
 import fcntl
 import json
 import os
-from contextlib import contextmanager, nullcontext
-from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 
 MARKER = '# Managed by bioenv; tool='
 SHELL_SHEBANG = '#!/bin/sh'
@@ -294,9 +294,7 @@ def remove(config, tool, launchers_only=False, dry_run=False):
         raise BioenvError(f'Launcher conflict prevents removal: {detail}')
     if not launchers_only and not initial['environment_exists']:
         return initial
-    root = Path(config['settings']['envs_root'])
-    lock = _environment_lock(config, tool) if root.is_dir() else nullcontext()
-    with lock:
+    with _environment_lock(config, tool):
         prefix, _, command, launchers = _remove_preconditions(
             config, tool, launchers_only=launchers_only
         )
@@ -389,14 +387,8 @@ def update(config, tool, latest=False, dry_run=False):
                 f'Could not run Micromamba at {config["settings"]["micromamba"]}: {exc}'
             ) from exc
         if dry_run:
-            return command, launchers, old_version
+            return command, launchers, old_version, None
         new_version = _conda_package_version(prefix, config['tools'][tool]['package'])
-        if latest and new_version == old_version:
-            raise BioenvError(
-                f'Micromamba completed but {config["tools"][tool]["package"]} remains at '
-                f'{new_version}; no newer resolvable version was installed. Check package pins '
-                'and platform or dependency constraints.'
-            )
         missing = [name for name, executable in command_map(config['tools'][tool]).items()
                    if not _is_executable(prefix / ENVIRONMENT_BIN / executable)]
         if missing:
@@ -405,13 +397,13 @@ def update(config, tool, latest=False, dry_run=False):
                 f'{", ".join(missing)}. Launchers were not published.'
             )
         try:
-            publish(config, tool)
+            _publish(config, tool)
         except BioenvError as exc:
             raise BioenvError(
                 f'Environment for {tool} was updated at {prefix}, but launcher publication '
                 f'failed: {exc}. The environment is not rolled back.'
             ) from exc
-        return command, launchers, new_version
+        return command, launchers, old_version, new_version
 
     if dry_run:
         return execute()
@@ -450,7 +442,7 @@ def _install(config, tool, dry_run=False):
             f'Could not run Micromamba at {config["settings"]["micromamba"]}: {exc}'
         ) from exc
     try:
-        publish(config, tool)
+        _publish(config, tool)
     except BioenvError as exc:
         raise BioenvError(
             f'Environment for {tool} was created at {prefix}, but launcher publication failed: '
@@ -460,6 +452,13 @@ def _install(config, tool, dry_run=False):
 
 
 def publish(config, tool, dry_run=False):
+    if not dry_run:
+        with _environment_lock(config, tool):
+            return _publish(config, tool, dry_run=False)
+    return _publish(config, tool, dry_run=True)
+
+
+def _publish(config, tool, dry_run=False):
     prefix, bin_dir = _preflight(config, tool)
     if not prefix.is_dir():
         raise BioenvError(f'Environment for {tool} is missing or is not a directory: {prefix}')

@@ -8,7 +8,7 @@ version = "0.3.0"
 description = "Lightweight manager for shared Micromamba bioinformatics environments"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = {text = "MIT"}
 dependencies = ["PyYAML>=6,<7"]
 classifiers = [
   "Programming Language :: Python :: 3",

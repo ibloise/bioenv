@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from bioenv.cli import main
-from bioenv.manager import BioenvError, check, publish, remove, remove_plan
+from bioenv.manager import BioenvError, publish, remove, remove_plan
 
 
 def setup_catalog(tmp_path, commands=None):
@@ -96,6 +96,61 @@ def test_remove_launchers_only_keeps_environment_and_skips_micromamba(tmp_path, 
     remove(config, 'spades', launchers_only=True)
     assert prefix.is_dir()
     assert all(not path.exists() for path in launchers)
+
+
+def test_remove_recovers_launchers_after_environment_was_already_removed(tmp_path, monkeypatch):
+    config = setup_catalog(tmp_path)
+    prefix = create_conda_env(config)
+    launchers = publish_launchers(config)
+    shutil.rmtree(prefix)
+    plan = remove_plan(config, 'spades')
+    assert not plan['environment_exists']
+    assert plan['command'] is None
+    assert [state for _, state in plan['launchers']] == ['managed', 'managed']
+    monkeypatch.setattr(
+        'bioenv.manager.subprocess.run',
+        lambda *args, **kwargs: pytest.fail('absent environments must not invoke micromamba'),
+    )
+    remove(config, 'spades', launchers_only=True)
+    assert all(not launcher.exists() for launcher in launchers)
+
+
+def test_remove_dry_run_reports_orphan_launchers_without_running_micromamba(
+    tmp_path, monkeypatch, capsys,
+):
+    config = setup_catalog(tmp_path)
+    prefix = create_conda_env(config)
+    launchers = publish_launchers(config)
+    shutil.rmtree(prefix)
+    config_path = _cli_config(config, tmp_path)
+    monkeypatch.setattr(
+        'bioenv.manager.subprocess.run',
+        lambda *args, **kwargs: pytest.fail('dry-run must not invoke micromamba'),
+    )
+    assert main(['--config', str(config_path), 'remove', 'spades', '--dry-run']) == 0
+    output = capsys.readouterr().out
+    assert 'already absent; no environment removal will be attempted' in output
+    assert output.count('(managed)') == 2
+    assert all(launcher.exists() for launcher in launchers)
+
+
+def test_remove_repeated_after_complete_removal_is_noop(tmp_path, monkeypatch):
+    config = setup_catalog(tmp_path, commands=['spades.py'])
+    prefix = create_conda_env(config)
+    launchers = publish_launchers(config)
+
+    def micromamba(command, **kwargs):
+        shutil.rmtree(prefix)
+
+    monkeypatch.setattr('bioenv.manager.subprocess.run', micromamba)
+    remove(config, 'spades')
+    monkeypatch.setattr(
+        'bioenv.manager.subprocess.run',
+        lambda *args, **kwargs: pytest.fail('repeat removal must not invoke micromamba'),
+    )
+    result = remove(config, 'spades')
+    assert not result['environment_exists']
+    assert all(not launcher.exists() for launcher in launchers)
 
 
 def test_remove_launchers_only_cli_with_yes(tmp_path, monkeypatch, capsys):

@@ -2,9 +2,9 @@
 
 import argparse
 import os
-from pathlib import Path
 import shlex
 import sys
+from pathlib import Path
 
 from bioenv import __version__
 from bioenv.config import DEFAULT_CONFIG, ConfigError, load_config
@@ -16,8 +16,8 @@ from bioenv.manager import (
     command_map,
     install,
     paths,
-    publish,
     plan_update,
+    publish,
     remove,
     remove_plan,
     update,
@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f'Operation: {shlex.join(command)}')
             if args.dry_run:
                 print('Micromamba solver simulation (--dry-run):')
-            _, launchers, installed_version = update(
+            _, launchers, old_version, installed_version = update(
                 config, tool, latest=args.latest, dry_run=args.dry_run,
             )
             if args.dry_run:
@@ -137,8 +137,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(f'Would synchronize launcher: {launcher}')
                 print('Solver simulation completed; no environment or launcher changes were made.')
             else:
-                version_text = f' ({installed_version})' if installed_version else ''
-                print(f'Updated {tool}{version_text} in {prefix}')
+                if installed_version == old_version:
+                    print(
+                        f'Updated {tool} in {prefix}; package version remains {installed_version}. '
+                        'Micromamba completed without changing the main package version.'
+                    )
+                else:
+                    print(
+                        f'Updated {tool} in {prefix}; package version '
+                        f'{old_version} -> {installed_version}'
+                    )
         elif args.command == 'publish':
             launchers = publish(config, tool, dry_run=args.dry_run)
             for launcher in launchers:
@@ -164,7 +172,11 @@ def main(argv: list[str] | None = None) -> int:
                 print('Dry run: no environment or launcher changes were made.')
                 return 0
             if not args.launchers_only and not plan['environment_exists']:
-                print(f'Environment for {tool} was already absent; no resources were removed.')
+                print(f'Environment for {tool} is already absent; Micromamba will not run.')
+                if any(state == 'managed' for _, state in plan['launchers']):
+                    print('Use --launchers-only to remove the remaining managed launchers.')
+                else:
+                    print('No managed launchers remain.')
                 return 0
             if not args.yes:
                 if not sys.stdin.isatty():

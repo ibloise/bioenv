@@ -1,7 +1,8 @@
 """Load and validate the small bioenv YAML catalog."""
 
-from pathlib import Path
 import re
+from pathlib import Path
+
 import yaml
 
 DEFAULT_CONFIG = Path('/etc/bioenv/tools.yaml')

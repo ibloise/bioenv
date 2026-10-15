@@ -26,8 +26,8 @@ tools:
   spades:
     package: spades
     commands:
-      - spades
-      - spades.py
+      spades: spades.py
+      spades.py: spades.py
 
   kraken2:
     package: kraken2

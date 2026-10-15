@@ -2,12 +2,14 @@
 
 ## Unreleased
 
-- Add `bioenv remove TOOL` with confirmation, `--yes`, `--dry-run`, and `--launchers-only`.
-- Remove declared Conda prefixes through Micromamba, then clean up only unchanged launchers
-  carrying the matching tool marker. Catalog declarations are the administrative authority,
-  including for environments created outside bioenv.
-- Report launcher conflicts and partial cleanup failures without manually deleting environment
-  directories or attempting automatic rollback.
+- Stabilize v0.3.0: treat a successful `update --latest` with no main-package version change
+  as success, report old and new versions, and still verify executables and synchronize launchers.
+- Allow safe recovery of managed launchers left after an environment has already been removed
+  by using `remove TOOL --launchers-only`.
+- Map the public SPAdes launcher to the Conda executable `spades.py` in the example catalog;
+  list-based command catalogs remain supported.
+- Coordinate standalone `publish` with `install`, `update` and `remove` using the existing
+  per-tool file lock. External Micromamba commands remain outside bioenv's lock.
 
 ## 0.3.0
 
@@ -16,3 +18,6 @@
   configured Micromamba solver choose the newest compatible version.
 - Add solver-backed `update --dry-run`, existing-environment checks, executable
   verification, launcher synchronization, and per-environment mutation locks.
+- Add `bioenv remove TOOL` with confirmation, `--yes`, `--dry-run`, and `--launchers-only`.
+  Removal uses catalog authority, Micromamba, and validation of unchanged managed launchers;
+  it does not delete environment directories recursively or attempt automatic rollback.
