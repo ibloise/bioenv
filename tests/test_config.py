@@ -10,7 +10,8 @@ EXAMPLE = Path(__file__).resolve().parents[1] / "config" / "tools.example.yaml"
 
 def test_example_catalog():
     config = load_config(EXAMPLE)
-    assert config["tools"]["bakta"]["environment"]["BAKTA_DB"].endswith("/db")
+    assert config["tools"]["bakta"]["databases"][0]["env"] == "BAKTA_DB"
+    assert config["tools"]["bakta"]["databases"][0]["path"] == "bakta/db"
     assert "kraken2-build" in config["tools"]["kraken2"]["commands"]
     assert config["tools"]["spades"]["commands"] == {
         "spades": "spades.py", "spades.py": "spades.py",
@@ -27,6 +28,81 @@ def test_alias_mapping_is_accepted_and_legacy_list_is_preserved(tmp_path):
     config = load_config(config_file)
     assert config['tools']['foo']['commands']['spades'] == 'spades.py'
     assert config['tools']['bar']['commands'] == ['fastqc']
+
+
+def test_database_schema_accepts_relative_and_legacy_absolute_paths(tmp_path):
+    config_file = tmp_path / 'database.yaml'
+    config_file.write_text(
+        f'settings:\n  databases_root: {tmp_path}/dbs\n'
+        'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
+        '    databases:\n      - name: managed\n        path: foo/db\n'
+        '        env: FOO_DB\n        install: [foo-db, install, "{path}"]\n'
+        f'      - name: legacy\n        path: {tmp_path}/legacy-db\n', encoding='utf-8'
+    )
+    config = load_config(config_file)
+    assert config['tools']['foo']['databases'][0]['path'] == 'foo/db'
+    assert config['tools']['foo']['databases'][1]['path'] == f'{tmp_path}/legacy-db'
+
+
+@pytest.mark.parametrize('path', ['../outside', 'foo/../outside'])
+def test_relative_database_paths_cannot_contain_parent_components(tmp_path, path):
+    config_file = tmp_path / 'database.yaml'
+    config_file.write_text(
+        f'settings:\n  databases_root: {tmp_path}/dbs\n'
+        'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
+        f'    databases: [{{name: db, path: "{path}"}}]\n', encoding='utf-8'
+    )
+    with pytest.raises(ConfigError, match=r'must not contain \.\.'):
+        load_config(config_file)
+
+
+def test_database_path_must_not_be_the_root_itself(tmp_path):
+    config_file = tmp_path / 'database.yaml'
+    config_file.write_text(
+        f'settings:\n  databases_root: {tmp_path}/dbs\n'
+        'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
+        '    databases: [{name: db, path: "."}]\n', encoding='utf-8'
+    )
+    with pytest.raises(ConfigError, match='must not contain'):
+        load_config(config_file)
+
+
+def test_relative_database_path_requires_databases_root(tmp_path):
+    config_file = tmp_path / 'database.yaml'
+    config_file.write_text(
+        'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
+        '    databases: [{name: db, path: foo/db}]\n', encoding='utf-8'
+    )
+    with pytest.raises(ConfigError, match='relative path needs databases_root'):
+        load_config(config_file)
+
+
+def test_database_path_markers_are_reserved_for_install_arguments(tmp_path):
+    config_file = tmp_path / 'database.yaml'
+    config_file.write_text(
+        f'settings:\n  databases_root: {tmp_path}/dbs\n'
+        'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
+        '    databases: [{name: db, path: "{root}/db"}]\n', encoding='utf-8'
+    )
+    with pytest.raises(ConfigError, match='only valid in install'):
+        load_config(config_file)
+
+
+@pytest.mark.parametrize(('databases', 'environment'), [
+    ('[{name: one, path: one, env: SHARED}, {name: two, path: two, env: SHARED}]', ''),
+    ('[{name: one, path: one, env: SHARED}]', '    environment: {SHARED: value}\n'),
+])
+def test_database_environment_variable_conflicts_are_rejected(
+    tmp_path, databases, environment,
+):
+    config_file = tmp_path / 'database.yaml'
+    config_file.write_text(
+        f'settings:\n  databases_root: {tmp_path}/dbs\n'
+        'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
+        + environment + f'    databases: {databases}\n', encoding='utf-8'
+    )
+    with pytest.raises(ConfigError, match='duplicate environment variable'):
+        load_config(config_file)
 
 
 @pytest.mark.parametrize('executable', ['/tmp/outside', '../outside', 'subdir/tool'])

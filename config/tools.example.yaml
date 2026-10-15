@@ -15,13 +15,18 @@ tools:
     commands:
       - bakta
       - bakta_db
-    environment:
-      BAKTA_DB: /mnt/2TB_HD/Databases/bakta/db
     databases:
       - name: full
-        path: /mnt/2TB_HD/Databases/bakta/db
+        path: bakta/db
+        env: BAKTA_DB
         required: true
-        # DB installation will be manual or explicitly invoked in a later version.
+        install:
+          - bakta_db
+          - download
+          - --output
+          - "{parent}"
+          - --type
+          - full
 
   spades:
     package: spades

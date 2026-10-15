@@ -13,8 +13,10 @@ from bioenv.manager import (
     MICROMAMBA_ROOT_ENV,
     BioenvError,
     check,
+    check_database,
     command_map,
     install,
+    install_database,
     paths,
     plan_update,
     publish,
@@ -56,6 +58,15 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument('--launchers-only', action='store_true',
                              help='Remove launchers while keeping the environment')
             sub.add_argument('--yes', action='store_true', help='Skip confirmation prompt')
+    db = commands.add_parser('db', help='Check or install a declared database')
+    db_commands = db.add_subparsers(dest='db_command', required=True)
+    db_install = db_commands.add_parser('install', help='Install a declared database')
+    db_install.add_argument('tool', help='Tool identifier from catalog')
+    db_install.add_argument('database', help='Database name from catalog')
+    db_install.add_argument('--dry-run', action='store_true', help='Show actions without changes')
+    db_check = db_commands.add_parser('check', help='Check a declared database')
+    db_check.add_argument('tool', help='Tool identifier from catalog')
+    db_check.add_argument('database', help='Database name from catalog')
     commands.add_parser('validate', help='Validate YAML catalog')
     return parser
 
@@ -71,6 +82,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'list':
             for name, spec in sorted(tools.items()):
                 print(f"{name}\t{spec['package']}\t{', '.join(command_map(spec))}")
+            return 0
+        if args.command == 'db':
+            if args.tool not in tools:
+                raise ConfigError(f'Unknown tool: {args.tool}')
+            if args.db_command == 'check':
+                ok, label = check_database(config, args.tool, args.database)
+                print(f'{"OK" if ok else "FAIL"}  {label}')
+                return 0 if ok else 1
+            plan = install_database(
+                config, args.tool, args.database, dry_run=args.dry_run,
+            )
+            print(f'Tool: {plan["tool"]}')
+            print(f'Database: {plan["database"]}')
+            print(f'Path: {plan["path"]}')
+            if args.dry_run:
+                print('Directories to create:')
+                if plan['directories']:
+                    for directory in plan['directories']:
+                        print(f'  {directory}')
+                else:
+                    print('  none')
+                print('Micromamba: ' + shlex.join(plan['command']))
+                print('Dry run: no files or directories were created.')
+            else:
+                print(f'Installed database {args.database} for {args.tool} at {plan["path"]}')
             return 0
         if args.tool not in tools:
             raise ConfigError(f'Unknown tool: {args.tool}')

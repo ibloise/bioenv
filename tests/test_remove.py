@@ -153,6 +153,25 @@ def test_remove_repeated_after_complete_removal_is_noop(tmp_path, monkeypatch):
     assert all(not launcher.exists() for launcher in launchers)
 
 
+def test_remove_environment_never_deletes_declared_database(tmp_path, monkeypatch):
+    config = setup_catalog(tmp_path, commands=['spades.py'])
+    config['settings']['databases_root'] = str(tmp_path / 'databases')
+    config['tools']['spades']['databases'] = [{
+        'name': 'index', 'path': 'spades/index', 'required': True,
+    }]
+    prefix = create_conda_env(config)
+    database = Path(config['settings']['databases_root']) / 'spades' / 'index'
+    database.mkdir(parents=True)
+    (database / 'keep').write_text('data', encoding='utf-8')
+
+    def micromamba(command, **kwargs):
+        shutil.rmtree(prefix)
+
+    monkeypatch.setattr('bioenv.manager.subprocess.run', micromamba)
+    remove(config, 'spades')
+    assert (database / 'keep').read_text(encoding='utf-8') == 'data'
+
+
 def test_remove_launchers_only_cli_with_yes(tmp_path, monkeypatch, capsys):
     config = setup_catalog(tmp_path, commands=['spades.py'])
     prefix = create_conda_env(config)

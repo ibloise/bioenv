@@ -3,8 +3,8 @@
 A small Python CLI for managing shared Micromamba bioinformatics tools on a multiuser
 Linux workstation.
 
-**Status: 0.3.0.** The CLI validates and inspects the catalog, creates, updates and removes
-tool environments, publishes selected launchers, and checks installations.
+**Status: 0.4.0.** The CLI validates and inspects the catalog, manages tool environments,
+publishes selected launchers, and checks or installs declared databases.
 
 ## Developer quick start
 
@@ -48,6 +48,10 @@ environment before running `pip`, if needed.
   environment. Use this mode to recover launchers left behind after an environment removal
   succeeded but launcher cleanup failed. `--dry-run` displays the planned Micromamba operation when applicable,
   launchers, missing resources and any conflicts without changing files or prompting.
+- `bioenv db check TOOL DATABASE` checks that a declared database directory is accessible.
+- `bioenv db install TOOL DATABASE` runs the database install arguments declared in the
+  catalog, through the tool's existing Micromamba environment. `--dry-run` prints the target,
+  directories to create and exact command without changing the filesystem.
 
 ```bash
 bioenv --config /etc/bioenv/tools.yaml update fastqc --dry-run
@@ -56,7 +60,42 @@ sudo bioenv --config /etc/bioenv/tools.yaml update fastqc
 bioenv --config /etc/bioenv/tools.yaml remove fastqc --dry-run
 sudo bioenv --config /etc/bioenv/tools.yaml remove fastqc
 sudo bioenv --config /etc/bioenv/tools.yaml remove fastqc --launchers-only --yes
+bioenv --config /etc/bioenv/tools.yaml db check bakta full
+bioenv --config /etc/bioenv/tools.yaml db install bakta full --dry-run
+sudo bioenv --config /etc/bioenv/tools.yaml db install bakta full
 ```
+
+Databases use the existing per-tool catalog. Relative `path` values are resolved beneath
+`settings.databases_root`; absolute paths remain supported for checking and launcher
+environment variables. An optional database `env` is exported by each launcher, so installing
+the database later does not require publishing launchers again. For example, the Bakta entry
+in `config/tools.example.yaml` maps `BAKTA_DB` to `bakta/db` and declares `bakta_db download`
+arguments. `db install` runs only an explicitly declared argument list, uses the absolute
+installer executable from the tool environment, and refuses an existing destination or a
+target outside `databases_root`. It does not install databases automatically with `install`,
+download files itself, update/remove databases, track their versions, or validate their
+contents. If an installer fails or does not create the expected directory, inspect any partial
+data manually; bioenv does not delete it or roll back the operation.
+
+The database portion of that catalog entry is:
+
+```yaml
+settings:
+  databases_root: /mnt/2TB_HD/Databases
+
+tools:
+  bakta:
+    databases:
+      - name: full
+        path: bakta/db
+        env: BAKTA_DB
+        required: true
+        install: [bakta_db, download, --output, "{parent}", --type, full]
+```
+
+For a manual Bakta installation, first run `bioenv db check bakta full` and inspect the
+configured target. Review `bioenv db install bakta full --dry-run`, then run the install only
+when the final `BAKTA_DB` path is not already present; bioenv refuses to overwrite it.
 
 Declaring a tool in the administrator-controlled catalog grants bioenv authority to
 administer the matching `<envs_root>/<tool>` prefix, including environments originally
@@ -128,7 +167,9 @@ and file, and prepare the shared storage paths with appropriate ownership and ac
   to create this directory if it is missing; for the shared default `/usr/local/bin`,
   have an administrator create and protect it.
 - Any required database directory must already be mounted or populated and readable by
-  the users running the tool. `bioenv` does not download or create databases.
+  the users running the tool. `db install` may create `settings.databases_root` and directories
+  along the target path; make that root writable by the installing administrator. It
+  executes only the install arguments declared by the catalog.
 
 ## Security notes
 
@@ -156,5 +197,5 @@ and file, and prepare the shared storage paths with appropriate ownership and ac
 - One stable shared environment per tool: `/opt/bioinformatics/envs/<tool>`.
 - Only explicitly listed commands are exported; never publish everything in `bin/`.
 - Runtime variables such as `BAKTA_DB` belong to the catalog.
-- Database downloads are explicit and databases are not automatically deleted.
+- Database installation is explicit and databases are never automatically updated or deleted.
 - Existing unrelated files and symlinks in the launcher directory are not replaced.

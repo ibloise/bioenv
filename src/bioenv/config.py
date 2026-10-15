@@ -16,7 +16,7 @@ DEFAULT_SETTINGS = {
 }
 SETTING_KEYS = {*DEFAULT_SETTINGS, 'databases_root'}
 TOOL_KEYS = {'package', 'python', 'version', 'commands', 'environment', 'databases'}
-DATABASE_KEYS = {'name', 'path', 'required'}
+DATABASE_KEYS = {'name', 'path', 'env', 'required', 'install'}
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -132,14 +132,44 @@ def _validate_environment(name, spec):
         raise ConfigError(f'Tool {name!r}: environment must map names to strings')
 
 
-def _validate_database(name, database):
+def _validate_database(name, database, databases_root):
     _reject_unknown_keys(database, DATABASE_KEYS, f'Tool {name!r} database setting(s)')
-    if not database['name']:
-        raise ConfigError(f'Tool {name!r}: database name must not be empty')
-    _absolute_path(database.get('path'), f'Tool {name!r} database path')
+    database_name = database.get('name')
+    if not isinstance(database_name, str) or not NAME.fullmatch(database_name):
+        raise ConfigError(f'Tool {name!r}: database name must be a simple name')
+    path_value = database.get('path')
+    if not isinstance(path_value, str) or not path_value:
+        raise ConfigError(f'Tool {name!r} database {database_name!r}: path must be a string')
+    if re.search(r'\{(?:root|path|parent)\}', path_value):
+        raise ConfigError(
+            f'Tool {name!r} database {database_name!r}: path markers are only valid in install'
+        )
+    path = Path(path_value)
+    if path.is_absolute():
+        _absolute_path(path_value, f'Tool {name!r} database path')
+    elif path == Path('.') or '..' in path.parts or databases_root is None:
+        raise ConfigError(
+            f'Tool {name!r} database {database_name!r}: relative path needs databases_root '
+            'and must not contain ..'
+        )
+    if 'env' in database and (
+        not isinstance(database['env'], str) or not ENV_NAME.fullmatch(database['env'])
+    ):
+        raise ConfigError(f'Tool {name!r} database {database_name!r}: invalid env variable')
+    if database.get('required', False) is not True and database.get('required', False) is not False:
+        raise ConfigError(f'Tool {name!r} database {database_name!r}: required must be boolean')
+    if 'install' in database:
+        arguments = database['install']
+        if not isinstance(arguments, list) or not arguments or any(
+            not isinstance(argument, str) or '\0' in argument for argument in arguments
+        ) or not NAME.fullmatch(arguments[0]):
+            raise ConfigError(
+                f'Tool {name!r} database {database_name!r}: install must be a non-empty '
+                'argument list starting with a simple executable name'
+            )
 
 
-def _validate_databases(name, value):
+def _validate_databases(name, value, databases_root, environment):
     databases = value.get('databases', [])
     if not isinstance(databases, list) or any(
         not isinstance(database, dict)
@@ -148,11 +178,24 @@ def _validate_databases(name, value):
         for database in databases
     ):
         raise ConfigError(f'Tool {name!r}: invalid databases list')
+    names = set()
+    env_names = set(environment)
     for database in databases:
-        _validate_database(name, database)
+        _validate_database(name, database, databases_root)
+        if database['name'] in names:
+            raise ConfigError(f'Tool {name!r}: duplicate database name {database["name"]!r}')
+        names.add(database['name'])
+        env_name = database.get('env')
+        if env_name is not None:
+            if env_name in env_names:
+                raise ConfigError(
+                    f'Tool {name!r}: duplicate environment variable {env_name!r} '
+                    'in environment and databases'
+                )
+            env_names.add(env_name)
 
 
-def _validate_tool(name, value, claimed_commands):
+def _validate_tool(name, value, claimed_commands, databases_root):
     if not isinstance(name, str) or not NAME.fullmatch(name) or name in ('.', '..'):
         raise ConfigError(f'Invalid tool name: {name!r}')
     spec = _require_mapping(value, f'Tool {name!r}')
@@ -166,19 +209,20 @@ def _validate_tool(name, value, claimed_commands):
             raise ConfigError(f'Tool {name!r}: {key} must be a quoted string')
 
     _validate_commands(name, spec.get('commands'), claimed_commands)
+    environment = spec.get('environment', {})
     _validate_environment(name, spec)
-    _validate_databases(name, spec)
+    _validate_databases(name, spec, databases_root, environment)
 
 
-def _validate_tools(tools):
+def _validate_tools(tools, databases_root):
     claimed_commands = {}
     for name, spec in tools.items():
-        _validate_tool(name, spec, claimed_commands)
+        _validate_tool(name, spec, claimed_commands, databases_root)
 
 
 def load_config(path: Path) -> dict:
     config = _read_yaml(path)
     _validate_catalog_shape(config)
     config['settings'] = _validated_settings(config.get('settings', {}))
-    _validate_tools(config['tools'])
+    _validate_tools(config['tools'], config['settings'].get('databases_root'))
     return config

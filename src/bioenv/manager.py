@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ ENVIRONMENT_BIN = 'bin'
 MICROMAMBA_ROOT_ENV = 'MAMBA_ROOT_PREFIX'
 CREATE_COMMAND = 'create'
 UPDATE_COMMAND = 'update'
+RUN_COMMAND = 'run'
 PREFIX_OPTION = '-p'
 YES_OPTION = '-y'
 ENV_REMOVE_COMMAND = 'env'
@@ -37,6 +39,61 @@ def command_map(spec):
     return commands if isinstance(commands, dict) else {command: command for command in commands}
 
 
+def _database_specs(config, tool):
+    if tool not in config['tools']:
+        raise BioenvError(f'Unknown tool: {tool}')
+    return config['tools'][tool].get('databases', [])
+
+
+def _database_spec(config, tool, database_name):
+    for database in _database_specs(config, tool):
+        if database['name'] == database_name:
+            return database
+    raise BioenvError(f'Unknown database {database_name!r} for tool {tool!r}')
+
+
+def _resolved_database_path(config, database):
+    configured = Path(database['path'])
+    if configured.is_absolute():
+        return configured
+    root_value = config['settings'].get('databases_root')
+    if root_value is None:
+        raise BioenvError('Relative database paths require settings.databases_root')
+    root = Path(root_value)
+    try:
+        resolved_root = root.resolve(strict=False)
+        resolved_path = (root / configured).resolve(strict=False)
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise BioenvError(
+            f'Relative database path escapes settings.databases_root: {configured}'
+        ) from exc
+    except (OSError, RuntimeError) as exc:
+        raise BioenvError(f'Cannot safely resolve database path {configured}: {exc}') from exc
+    return resolved_path
+
+
+def _managed_database_path(config, database):
+    root_value = config['settings'].get('databases_root')
+    if root_value is None:
+        raise BioenvError('Managed database installation requires settings.databases_root')
+    try:
+        root = Path(root_value).resolve(strict=False)
+        path = _resolved_database_path(config, database).resolve(strict=False)
+        if not path.relative_to(root).parts:
+            raise BioenvError(
+                'Managed database installation cannot use databases_root as the destination'
+            )
+    except ValueError as exc:
+        raise BioenvError(
+            f'Managed database installation must stay within settings.databases_root: '
+            f'{database["path"]}'
+        ) from exc
+    except (OSError, RuntimeError) as exc:
+        raise BioenvError(f'Cannot safely resolve database install path: {exc}') from exc
+    return root, path
+
+
 def _wrapper(tool, command, executable, config):
     spec = config['tools'][tool]
     prefix, _ = paths(config, tool)
@@ -44,6 +101,10 @@ def _wrapper(tool, command, executable, config):
     lines = [SHELL_SHEBANG, f'{MARKER}{tool}']
     for key, value in spec.get('environment', {}).items():
         lines.append(f'export {key}={shlex.quote(value)}')
+    for database in spec.get('databases', []):
+        if 'env' in database:
+            value = str(_resolved_database_path(config, database))
+            lines.append(f'export {database["env"]}={shlex.quote(value)}')
     lines.append(
         f'export {MICROMAMBA_ROOT_ENV}={shlex.quote(config["settings"]["mamba_root"])}'
     )
@@ -531,13 +592,123 @@ def check(config, tool):
         dest = bin_dir / command
         launcher_ok = _current_launcher(dest, tool, command, executable, config)
         result.append((launcher_ok, f'Current executable launcher: {dest}'))
-    for db in config['tools'][tool].get('databases', []):
-        db_path = Path(db['path'])
-        exists = db_path.is_dir()
-        required = db.get('required', False)
-        readable = exists and os.access(db_path, os.R_OK | os.X_OK)
-        ok = readable or (not required and not exists)
-        state = 'required database' if required else 'optional database'
-        detail = 'available' if readable else ('not installed' if not exists else 'not readable')
-        result.append((ok, f'{state} {db["name"]} {detail}: {db_path}'))
+    for database in config['tools'][tool].get('databases', []):
+        result.append(_database_check(config, tool, database))
     return result
+
+
+def _database_check(config, tool, database):
+    db_path = _resolved_database_path(config, database)
+    exists = db_path.is_dir()
+    required = database.get('required', False)
+    readable = exists and os.access(db_path, os.R_OK | os.X_OK)
+    ok = readable or (not required and not exists)
+    state = 'required database' if required else 'optional database'
+    detail = 'available' if readable else ('not installed' if not exists else 'not readable')
+    return ok, f'{state} {database["name"]} {detail}: {db_path}'
+
+
+def check_database(config, tool, database_name):
+    database = _database_spec(config, tool, database_name)
+    return _database_check(config, tool, database)
+
+
+def database_install_plan(config, tool, database_name):
+    database = _database_spec(config, tool, database_name)
+    if 'install' not in database:
+        raise BioenvError(
+            f'Database {database_name!r} for {tool!r} has no declared install procedure'
+        )
+    prefix, _ = paths(config, tool)
+    if prefix.is_symlink():
+        raise BioenvError(f'Refusing to use environment path because it is a symlink: {prefix}')
+    if not prefix.is_dir() or not (prefix / 'conda-meta' / 'history').is_file():
+        raise BioenvError(f'No valid Conda environment for {tool!r} at {prefix}')
+    root, destination = _managed_database_path(config, database)
+    if destination.exists() or destination.is_symlink():
+        raise BioenvError(f'Database destination already exists; refusing to overwrite: {destination}')
+    executable_name = database['install'][0]
+    executable = prefix / ENVIRONMENT_BIN / executable_name
+    if not _is_executable(executable):
+        raise BioenvError(f'Database installer executable is missing or not executable: {executable}')
+    substitutions = {
+        '{root}': str(root),
+        '{path}': str(destination),
+        '{parent}': str(destination.parent),
+    }
+    marker = re.compile(r'\{(?:root|path|parent)\}')
+    arguments = [marker.sub(lambda match: substitutions[match.group()], value)
+                 for value in database['install'][1:]]
+    command = [
+        config['settings']['micromamba'], RUN_COMMAND, PREFIX_OPTION, str(prefix),
+        str(executable), *arguments,
+    ]
+    missing_directories = []
+    parent = destination.parent
+    cursor = parent
+    while not cursor.exists():
+        missing_directories.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    missing_directories.reverse()
+    return {
+        'tool': tool,
+        'database': database_name,
+        'root': root,
+        'path': destination,
+        'command': command,
+        'directories': missing_directories,
+    }
+
+
+def install_database(config, tool, database_name, dry_run=False):
+    if dry_run:
+        return database_install_plan(config, tool, database_name)
+    with _environment_lock(config, tool):
+        plan = database_install_plan(config, tool, database_name)
+        destination = plan['path']
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise BioenvError(
+                f'Cannot create database parent directory {destination.parent}: {exc}'
+            ) from exc
+        # Re-resolve after creating parents so a newly introduced symlink cannot escape root.
+        plan = database_install_plan(config, tool, database_name)
+        destination = plan['path']
+        env = os.environ.copy()
+        env[MICROMAMBA_ROOT_ENV] = config['settings']['mamba_root']
+        try:
+            subprocess.run(plan['command'], env=env, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise BioenvError(
+                f'Micromamba failed to install database {database_name!r} for {tool!r} '
+                f'(exit status {exc.returncode}); partial data may remain at {destination}. '
+                'Inspect or clean it manually before retrying.'
+            ) from exc
+        except KeyboardInterrupt as exc:
+            raise BioenvError(
+                f'Database installation for {tool!r}/{database_name!r} was interrupted; '
+                f'partial data may remain at {destination}. Inspect it manually.'
+            ) from exc
+        except OSError as exc:
+            raise BioenvError(
+                f'Could not run Micromamba at {config["settings"]["micromamba"]}: {exc}; '
+                f'partial data may remain at {destination}.'
+            ) from exc
+        try:
+            resolved_root = Path(plan['root']).resolve(strict=False)
+            resolved_destination = destination.resolve(strict=False)
+            resolved_destination.relative_to(resolved_root)
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise BioenvError(
+                f'Database installer created a path outside databases_root or an unsafe link: '
+                f'{destination}'
+            ) from exc
+        if not destination.is_dir() or not os.access(destination, os.R_OK | os.X_OK):
+            raise BioenvError(
+                f'Database installer completed but the expected accessible directory is missing: '
+                f'{destination}'
+            )
+        return plan

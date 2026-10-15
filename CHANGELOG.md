@@ -2,14 +2,17 @@
 
 ## Unreleased
 
-- Stabilize v0.3.0: treat a successful `update --latest` with no main-package version change
-  as success, report old and new versions, and still verify executables and synchronize launchers.
-- Allow safe recovery of managed launchers left after an environment has already been removed
-  by using `remove TOOL --launchers-only`.
-- Map the public SPAdes launcher to the Conda executable `spades.py` in the example catalog;
-  list-based command catalogs remain supported.
-- Coordinate standalone `publish` with `install`, `update` and `remove` using the existing
-  per-tool file lock. External Micromamba commands remain outside bioenv's lock.
+
+## 0.4.0
+
+- Add optional database environment variables and declarative install arguments to tool
+  database entries, while retaining legacy absolute database paths.
+- Resolve relative database paths beneath `settings.databases_root`, reject path escapes, and
+  export configured database variables in generated launchers.
+- Add `bioenv db check` and `bioenv db install`, including a read-only `--dry-run`; database
+  installs run declared commands inside the tool's Micromamba environment and are never
+  automatically updated or removed.
+- Document Bakta as the first declarative database example.
 
 ## 0.3.0
 
@@ -21,3 +24,9 @@
 - Add `bioenv remove TOOL` with confirmation, `--yes`, `--dry-run`, and `--launchers-only`.
   Removal uses catalog authority, Micromamba, and validation of unchanged managed launchers;
   it does not delete environment directories recursively or attempt automatic rollback.
+- Stabilize `update --latest` so a successful operation with an unchanged main package version
+  reports success and still verifies executables and synchronizes launchers.
+- Allow safe recovery of managed launchers after environment removal with
+  `remove TOOL --launchers-only`, and serialize standalone `publish` with other mutations.
+- Map the SPAdes public launcher to its `spades.py` executable in the example catalog while
+  retaining list-based command declarations.
