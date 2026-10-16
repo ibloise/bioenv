@@ -64,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     db_install.add_argument('tool', help='Tool identifier from catalog')
     db_install.add_argument('database', help='Database name from catalog')
     db_install.add_argument('--dry-run', action='store_true', help='Show actions without changes')
+    origins = db_install.add_mutually_exclusive_group()
+    origins.add_argument('--file', type=Path, help='Local installer input file')
+    origins.add_argument('--source', type=Path, help='Local installer input directory')
     db_check = db_commands.add_parser('check', help='Check a declared database')
     db_check.add_argument('tool', help='Tool identifier from catalog')
     db_check.add_argument('database', help='Database name from catalog')
@@ -92,10 +95,15 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if ok else 1
             plan = install_database(
                 config, args.tool, args.database, dry_run=args.dry_run,
+                file=args.file, source=args.source,
             )
             print(f'Tool: {plan["tool"]}')
             print(f'Database: {plan["database"]}')
             print(f'Path: {plan["path"]}')
+            if plan['file']:
+                print(f'File: {plan["file"]}')
+            if plan['source']:
+                print(f'Source: {plan["source"]}')
             if args.dry_run:
                 print('Directories to create:')
                 if plan['directories']:

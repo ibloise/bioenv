@@ -613,12 +613,35 @@ def check_database(config, tool, database_name):
     return _database_check(config, tool, database)
 
 
-def database_install_plan(config, tool, database_name):
+def database_install_plan(config, tool, database_name, file=None, source=None):
     database = _database_spec(config, tool, database_name)
     if 'install' not in database:
         raise BioenvError(
             f'Database {database_name!r} for {tool!r} has no declared install procedure'
         )
+    if file is not None and source is not None:
+        raise BioenvError('Provide only one of --file or --source')
+    markers = set(re.findall(
+        r'\{(root|path|parent|file|source)\}', '\n'.join(database['install'][1:])
+    ))
+    if file is not None and 'file' not in markers:
+        raise BioenvError('A local --file was provided but the installer does not use {file}')
+    if source is not None and 'source' not in markers:
+        raise BioenvError('A local --source was provided but the installer does not use {source}')
+    if 'file' in markers and file is None:
+        raise BioenvError('This database installer requires --file because it uses {file}')
+    if 'source' in markers and source is None:
+        raise BioenvError('This database installer requires --source because it uses {source}')
+    resolved_origins = {}
+    for key, value, kind in (('file', file, 'file'), ('source', source, 'directory')):
+        if value is None:
+            continue
+        origin = Path(value).resolve()
+        if not (origin.is_file() if kind == 'file' else origin.is_dir()):
+            raise BioenvError(f'Local --{key} must be an existing {kind}: {value}')
+        if not os.access(origin, os.R_OK):
+            raise BioenvError(f'Local --{key} is not accessible: {origin}')
+        resolved_origins[key] = str(origin)
     prefix, _ = paths(config, tool)
     if prefix.is_symlink():
         raise BioenvError(f'Refusing to use environment path because it is a symlink: {prefix}')
@@ -635,8 +658,9 @@ def database_install_plan(config, tool, database_name):
         '{root}': str(root),
         '{path}': str(destination),
         '{parent}': str(destination.parent),
+        **{f'{{{key}}}': value for key, value in resolved_origins.items()},
     }
-    marker = re.compile(r'\{(?:root|path|parent)\}')
+    marker = re.compile(r'\{(?:root|path|parent|file|source)\}')
     arguments = [marker.sub(lambda match: substitutions[match.group()], value)
                  for value in database['install'][1:]]
     command = [
@@ -657,16 +681,18 @@ def database_install_plan(config, tool, database_name):
         'database': database_name,
         'root': root,
         'path': destination,
+        'file': resolved_origins.get('file'),
+        'source': resolved_origins.get('source'),
         'command': command,
         'directories': missing_directories,
     }
 
 
-def install_database(config, tool, database_name, dry_run=False):
+def install_database(config, tool, database_name, dry_run=False, file=None, source=None):
     if dry_run:
-        return database_install_plan(config, tool, database_name)
+        return database_install_plan(config, tool, database_name, file=file, source=source)
     with _environment_lock(config, tool):
-        plan = database_install_plan(config, tool, database_name)
+        plan = database_install_plan(config, tool, database_name, file=file, source=source)
         destination = plan['path']
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -675,7 +701,7 @@ def install_database(config, tool, database_name, dry_run=False):
                 f'Cannot create database parent directory {destination.parent}: {exc}'
             ) from exc
         # Re-resolve after creating parents so a newly introduced symlink cannot escape root.
-        plan = database_install_plan(config, tool, database_name)
+        plan = database_install_plan(config, tool, database_name, file=file, source=source)
         destination = plan['path']
         env = os.environ.copy()
         env[MICROMAMBA_ROOT_ENV] = config['settings']['mamba_root']

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Extend `bioenv db install` with optional local `--file` and `--source` inputs substituted
+  through catalog `{file}` and `{source}` markers; origins are validated and never managed.
+- Document external download responsibility and Kraken2 multi-step preparation limitations.
+
 
 ## 0.4.0
 

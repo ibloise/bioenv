@@ -140,7 +140,7 @@ def _validate_database(name, database, databases_root):
     path_value = database.get('path')
     if not isinstance(path_value, str) or not path_value:
         raise ConfigError(f'Tool {name!r} database {database_name!r}: path must be a string')
-    if re.search(r'\{(?:root|path|parent)\}', path_value):
+    if re.search(r'\{(?:root|path|parent|file|source)\}', path_value):
         raise ConfigError(
             f'Tool {name!r} database {database_name!r}: path markers are only valid in install'
         )

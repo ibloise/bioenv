@@ -50,8 +50,9 @@ environment before running `pip`, if needed.
   launchers, missing resources and any conflicts without changing files or prompting.
 - `bioenv db check TOOL DATABASE` checks that a declared database directory is accessible.
 - `bioenv db install TOOL DATABASE` runs the database install arguments declared in the
-  catalog, through the tool's existing Micromamba environment. `--dry-run` prints the target,
-  directories to create and exact command without changing the filesystem.
+  catalog, through the tool's existing Micromamba environment. Optional `--file PATH` and
+  `--source DIR` pass local inputs to catalog commands using `{file}` or `{source}`. `--dry-run`
+  prints the target, origins, directories to create and exact command without changing files.
 
 ```bash
 bioenv --config /etc/bioenv/tools.yaml update fastqc --dry-run
@@ -63,6 +64,7 @@ sudo bioenv --config /etc/bioenv/tools.yaml remove fastqc --launchers-only --yes
 bioenv --config /etc/bioenv/tools.yaml db check bakta full
 bioenv --config /etc/bioenv/tools.yaml db install bakta full --dry-run
 sudo bioenv --config /etc/bioenv/tools.yaml db install bakta full
+sudo bioenv --config /etc/bioenv/tools.yaml db install bakta light --file '/mnt/downloads/db-light.tar.xz'
 ```
 
 Databases use the existing per-tool catalog. Relative `path` values are resolved beneath
@@ -75,7 +77,11 @@ installer executable from the tool environment, and refuses an existing destinat
 target outside `databases_root`. It does not install databases automatically with `install`,
 download files itself, update/remove databases, track their versions, or validate their
 contents. If an installer fails or does not create the expected directory, inspect any partial
-data manually; bioenv does not delete it or roll back the operation.
+data manually; bioenv does not delete it or roll back the operation. Downloads must be obtained
+externally: bioenv does not manage FTP, HTTP, checksums or resumed downloads. A declared
+`{file}` argument requires `--file`; `{source}` requires `--source`. Supplying either option to
+a procedure that does not consume it is an error. Origins may be relative paths (resolved from
+the current working directory) and are never copied, moved or removed by bioenv.
 
 The database portion of that catalog entry is:
 
@@ -92,6 +98,30 @@ tools:
         required: true
         install: [bakta_db, download, --output, "{parent}", --type, full]
 ```
+
+This automatic procedure is run without a local origin:
+
+```bash
+bioenv db install bakta full
+```
+
+For an administrator-downloaded archive, declare an installer procedure that consumes
+`{file}`, for example:
+
+```yaml
+install: [bakta_db, install, --db-file, "{file}", --output, "{parent}"]
+```
+
+Then run:
+
+```bash
+bioenv db install bakta light --file /ruta/db-light.tar.xz
+```
+
+Kraken2 builds that need multiple preparation/build commands are not represented as workflows.
+In particular, `db install` refuses an existing destination, so preparing input files in the
+final database directory and then building there is outside this command; perform that setup
+manually and do not use `db install` over the existing directory.
 
 For a manual Bakta installation, first run `bioenv db check bakta full` and inspect the
 configured target. Review `bioenv db install bakta full --dry-run`, then run the install only

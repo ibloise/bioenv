@@ -321,3 +321,67 @@ def test_absolute_legacy_database_path_needs_no_databases_root(tmp_path):
     config_path.write_text(yaml.safe_dump(raw_config), encoding='utf-8')
     config = load_config(config_path)
     assert check_database(config, 'bakta', 'full')[0] is False
+
+
+@pytest.mark.parametrize(('key', 'kind'), [('file', 'file'), ('source', 'directory')])
+def test_local_database_origins_substitute_absolute_paths(tmp_path, key, kind):
+    _, config = make_config(tmp_path)
+    create_environment(config)
+    origin = tmp_path / 'origin with spaces'
+    if kind == 'file':
+        origin.write_text('payload')
+        config['tools']['bakta']['databases'][0]['install'].append('{file}')
+    else:
+        origin.mkdir()
+        config['tools']['bakta']['databases'][0]['install'].append('{source}')
+    plan = database_install_plan(config, 'bakta', 'full', **{key: origin})
+    assert str(origin.resolve()) in plan['command']
+    assert plan[key] == str(origin.resolve())
+
+
+def test_local_database_origin_requirements_and_types(tmp_path):
+    _, config = make_config(tmp_path)
+    create_environment(config)
+    config['tools']['bakta']['databases'][0]['install'].append('{file}')
+    with pytest.raises(BioenvError, match='requires --file'):
+        database_install_plan(config, 'bakta', 'full')
+    with pytest.raises(BioenvError, match='existing file'):
+        database_install_plan(config, 'bakta', 'full', file=tmp_path / 'missing')
+    directory = tmp_path / 'directory'
+    directory.mkdir()
+    with pytest.raises(BioenvError, match='existing file'):
+        database_install_plan(config, 'bakta', 'full', file=directory)
+
+
+def test_local_source_directory_requirements_and_type(tmp_path):
+    _, config = make_config(tmp_path)
+    create_environment(config)
+    config['tools']['bakta']['databases'][0]['install'].append('{source}')
+    with pytest.raises(BioenvError, match='requires --source'):
+        database_install_plan(config, 'bakta', 'full')
+    with pytest.raises(BioenvError, match='existing directory'):
+        database_install_plan(config, 'bakta', 'full', source=tmp_path / 'missing')
+    file = tmp_path / 'file'
+    file.touch()
+    with pytest.raises(BioenvError, match='existing directory'):
+        database_install_plan(config, 'bakta', 'full', source=file)
+
+
+def test_local_origin_cli_dry_run_is_read_only(tmp_path, monkeypatch, capsys):
+    config_path, config = make_config(tmp_path)
+    create_environment(config)
+    origin = tmp_path / 'db light.tar.xz'
+    origin.write_text('payload')
+    config['tools']['bakta']['databases'][0]['install'].append('{file}')
+    raw = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    raw['tools']['bakta']['databases'][0]['install'].append('{file}')
+    config_path.write_text(yaml.safe_dump(raw), encoding='utf-8')
+    before = set(tmp_path.rglob('*'))
+    monkeypatch.setattr('bioenv.manager.subprocess.run',
+                        lambda *args, **kwargs: pytest.fail('dry run executed installer'))
+    assert main(['--config', str(config_path), 'db', 'install', 'bakta', 'full',
+                 '--file', str(origin), '--dry-run']) == 0
+    output = capsys.readouterr().out
+    assert f'File: {origin.resolve()}' in output
+    assert str(origin.resolve()) in output
+    assert set(tmp_path.rglob('*')) == before
