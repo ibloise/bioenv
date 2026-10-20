@@ -2,21 +2,19 @@
 
 ## Unreleased
 
-- Extend `bioenv db install` with optional local `--file` and `--source` inputs substituted
-  through catalog `{file}` and `{source}` markers; origins are validated and never managed.
-- Document external download responsibility and Kraken2 multi-step preparation limitations.
+- Replace tool-specific database installer procedures with `bioenv db import` for prepared
+  directories and files; copies use a temporary path and atomic rename.
+- Add catalog `type: file` for single-file databases; directories remain the default.
+- Reject symbolic links in import sources and document the Kraken2 prepare/import/check flow.
 
 
 ## 0.4.0
 
-- Add optional database environment variables and declarative install arguments to tool
-  database entries, while retaining legacy absolute database paths.
+- Add optional database environment variables to tool database entries, while retaining
+  legacy absolute database paths.
 - Resolve relative database paths beneath `settings.databases_root`, reject path escapes, and
   export configured database variables in generated launchers.
-- Add `bioenv db check` and `bioenv db install`, including a read-only `--dry-run`; database
-  installs run declared commands inside the tool's Micromamba environment and are never
-  automatically updated or removed.
-- Document Bakta as the first declarative database example.
+- Add `bioenv db check` and configurable database paths.
 
 ## 0.3.0
 

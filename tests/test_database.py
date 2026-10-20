@@ -1,387 +1,206 @@
-import shlex
-import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
 from bioenv.cli import main
-from bioenv.config import load_config
-from bioenv.manager import (
-    BioenvError,
-    check,
-    check_database,
-    database_install_plan,
-    install_database,
-    publish,
-)
-from bioenv.manager import (
-    install as install_tool,
-)
+from bioenv.config import ConfigError, load_config
+from bioenv.manager import BioenvError, check_database, import_database
 
 
-def make_config(tmp_path, *, database_path='bakta/full', install=True, required=True,
-                database_env='BAKTA_DB', environment=None):
-    envs = tmp_path / 'envs'
-    databases_root = tmp_path / 'database root'
+def make_config(tmp_path, *, path='tool/db', kind='directory', required=True):
     config = {
         'settings': {
-            'envs_root': str(envs),
-            'bin_dir': str(tmp_path / 'bin'),
-            'micromamba': str(tmp_path / 'micromamba'),
-            'mamba_root': str(tmp_path / 'mamba root'),
-            'databases_root': str(databases_root),
+            'envs_root': str(tmp_path / 'envs'), 'bin_dir': str(tmp_path / 'bin'),
+            'micromamba': str(tmp_path / 'micromamba'), 'mamba_root': str(tmp_path / 'mamba'),
+            'databases_root': str(tmp_path / 'databases'),
         },
-        'tools': {
-            'bakta': {
-                'package': 'bakta',
-                'commands': ['bakta', 'bakta_db'],
-                'databases': [{
-                    'name': 'full',
-                    'path': database_path,
-                    'required': required,
-                    **({'env': database_env} if database_env else {}),
-                    **({'install': [
-                        'bakta_db', 'download', '--output', '{parent}',
-                        '--database', '{path}', '--cache', '{root}/cache',
-                    ]} if install else {}),
-                }],
-                **({'environment': environment} if environment is not None else {}),
-            },
-        },
+        'tools': {'tool': {
+            'package': 'tool', 'commands': ['tool'],
+            'databases': [{'name': 'db', 'path': path, 'type': kind, 'required': required,
+                           'env': 'TOOL_DB'}],
+        }},
     }
     config_path = tmp_path / 'tools.yaml'
     config_path.write_text(yaml.safe_dump(config), encoding='utf-8')
     return config_path, load_config(config_path)
 
 
-def create_environment(config, *, installer=True):
-    prefix = Path(config['settings']['envs_root']) / 'bakta'
-    metadata = prefix / 'conda-meta'
-    metadata.mkdir(parents=True)
-    (metadata / 'history').write_text('', encoding='utf-8')
-    bindir = prefix / 'bin'
-    bindir.mkdir()
-    for name in ('bakta', 'bakta_db'):
-        executable = bindir / name
-        executable.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
-        executable.chmod(0o755)
-    if not installer:
-        (bindir / 'bakta_db').unlink()
-    return prefix
-
-
-def test_relative_database_path_resolves_under_root(tmp_path):
+def test_import_directory_copies_contents_and_preserves_origin(tmp_path):
     _, config = make_config(tmp_path)
-    create_environment(config)
-    assert database_install_plan(config, 'bakta', 'full')['path'] == (
-        tmp_path / 'database root' / 'bakta' / 'full'
-    )
+    source = tmp_path / 'prepared'
+    (source / 'nested').mkdir(parents=True)
+    (source / 'nested' / 'data').write_text('database')
+    import_database(config, 'tool', 'db', source=source)
+    destination = tmp_path / 'databases' / 'tool' / 'db'
+    assert (destination / 'nested' / 'data').read_text() == 'database'
+    assert (source / 'nested' / 'data').read_text() == 'database'
+    assert check_database(config, 'tool', 'db')[0]
 
 
-def test_absolute_database_path_is_preserved_for_check_and_launcher(tmp_path):
-    absolute = tmp_path / 'explicit database'
-    _, config = make_config(tmp_path, database_path=str(absolute), install=False)
-    create_environment(config)
-    launcher = publish(config, 'bakta')[0]
-    assert f'export BAKTA_DB={shlex.quote(str(absolute))}' in launcher.read_text()
-    ok, label = check_database(config, 'bakta', 'full')
-    assert not ok and str(absolute) in label
+def test_import_file_copies_file_to_declared_destination(tmp_path):
+    _, config = make_config(tmp_path, path='tool/db.bin', kind='file')
+    source = tmp_path / 'prepared.bin'
+    source.write_bytes(b'raw database')
+    import_database(config, 'tool', 'db', file=source)
+    assert (tmp_path / 'databases' / 'tool' / 'db.bin').read_bytes() == b'raw database'
+    assert source.read_bytes() == b'raw database'
+    assert check_database(config, 'tool', 'db')[0]
 
 
-def test_launcher_exports_database_path_quoted_without_requiring_database(tmp_path):
-    _, config = make_config(tmp_path, database_path='bakta/full data')
-    expected_root = tmp_path / "database's $root"
-    config['settings']['databases_root'] = str(expected_root)
-    micromamba = tmp_path / 'micromamba'
-    micromamba.write_text('#!/bin/sh\nprintf %s "$BAKTA_DB"\n', encoding='utf-8')
-    micromamba.chmod(0o755)
-    config['settings']['micromamba'] = str(micromamba)
-    create_environment(config)
-    launcher = publish(config, 'bakta')[0]
-    content = launcher.read_text(encoding='utf-8')
-    expected = str(expected_root / 'bakta' / 'full data')
-    assert f'export BAKTA_DB={shlex.quote(expected)}' in content
-    assert not Path(expected).exists()
-    completed = subprocess.run([launcher], capture_output=True, text=True, check=True)
-    assert completed.stdout == expected
-
-
-def test_launcher_preserves_other_environment_variables(tmp_path):
-    _, config = make_config(tmp_path, environment={'DATA_LABEL': 'value with spaces'})
-    create_environment(config)
-    content = publish(config, 'bakta')[0].read_text(encoding='utf-8')
-    assert "export DATA_LABEL='value with spaces'" in content
-    assert 'export BAKTA_DB=' in content
-
-
-def test_relative_database_path_rejects_symlink_escape(tmp_path):
+@pytest.mark.parametrize('source_kind', ['missing', 'file'])
+def test_source_option_requires_existing_directory(tmp_path, source_kind):
     _, config = make_config(tmp_path)
-    create_environment(config)
-    root = Path(config['settings']['databases_root'])
-    outside = tmp_path / 'outside'
-    outside.mkdir()
-    (root / 'bakta').mkdir(parents=True)
-    (root / 'bakta' / 'full').symlink_to(outside, target_is_directory=True)
-    with pytest.raises(BioenvError, match='escapes settings.databases_root'):
-        publish(config, 'bakta')
-    with pytest.raises(BioenvError, match='escapes settings.databases_root'):
-        database_install_plan(config, 'bakta', 'full')
+    source = tmp_path / 'source'
+    if source_kind == 'file':
+        source.touch()
+    elif source_kind == 'directory':
+        source.mkdir()
+    with pytest.raises(BioenvError, match='does not exist|must be an accessible directory'):
+        import_database(config, 'tool', 'db', source=source)
 
 
-def test_installer_command_uses_absolute_environment_executable_and_literal_substitutions(
-    tmp_path, monkeypatch,
-):
+def test_file_option_requires_configured_file_database(tmp_path):
     _, config = make_config(tmp_path)
-    prefix = create_environment(config)
-    plan = database_install_plan(config, 'bakta', 'full')
-    captured = {}
-    destination = plan['path']
-
-    def run(command, **kwargs):
-        captured['command'] = command
-        captured['env'] = kwargs['env']
-        captured['kwargs'] = kwargs
-        destination.mkdir(parents=True)
-
-    monkeypatch.setattr('bioenv.manager.subprocess.run', run)
-    result = install_database(config, 'bakta', 'full')
-    assert captured['command'] == [
-        config['settings']['micromamba'], 'run', '-p', str(prefix),
-        str(prefix / 'bin' / 'bakta_db'), 'download', '--output',
-        str(destination.parent), '--database', str(destination), '--cache',
-        str(Path(config['settings']['databases_root']) / 'cache'),
-    ]
-    assert captured['kwargs']['check'] is True
-    assert 'shell' not in captured['kwargs']
-    assert captured['env']["MAMBA_ROOT_PREFIX"] == config['settings']['mamba_root']
-    assert result['path'] == destination
-    assert destination.is_dir()
+    source = tmp_path / 'source'
+    source.touch()
+    with pytest.raises(BioenvError, match='configured as a directory'):
+        import_database(config, 'tool', 'db', file=source)
 
 
-def test_install_creates_missing_parent_directories(tmp_path, monkeypatch):
-    _, config = make_config(tmp_path, database_path='new/nested/full')
-    prefix = create_environment(config)
-    destination = Path(config['settings']['databases_root']) / 'new' / 'nested' / 'full'
-    observed = []
-
-    def run(command, **kwargs):
-        observed.append(command)
-        destination.mkdir(parents=True)
-
-    monkeypatch.setattr('bioenv.manager.subprocess.run', run)
-    plan = install_database(config, 'bakta', 'full')
-    assert destination.is_dir()
-    assert plan['path'] == destination
-    assert observed and str(prefix / 'bin' / 'bakta_db') in observed[0]
-
-
-def test_tool_install_does_not_automatically_install_databases(tmp_path, monkeypatch):
-    _, config = make_config(tmp_path)
-    observed = []
-
-    def create_environment_from_micromamba(command, **kwargs):
-        observed.append(command)
-        create_environment(config)
-
-    monkeypatch.setattr('bioenv.manager.subprocess.run', create_environment_from_micromamba)
-    install_tool(config, 'bakta')
-    assert len(observed) == 1 and observed[0][1] == 'create'
-    assert not (Path(config['settings']['databases_root']) / 'bakta' / 'full').exists()
-
-
-def test_install_rejects_existing_database_without_running_micromamba(tmp_path, monkeypatch):
-    _, config = make_config(tmp_path)
-    create_environment(config)
-    destination = Path(config['settings']['databases_root']) / 'bakta' / 'full'
-    destination.mkdir(parents=True)
-    monkeypatch.setattr(
-        'bioenv.manager.subprocess.run',
-        lambda *args, **kwargs: pytest.fail('existing database must not be overwritten'),
-    )
-    with pytest.raises(BioenvError, match='already exists'):
-        install_database(config, 'bakta', 'full')
-
-
-def test_install_rejects_missing_install_procedure(tmp_path):
-    _, config = make_config(tmp_path, install=False)
-    create_environment(config)
-    with pytest.raises(BioenvError, match='no declared install procedure'):
-        database_install_plan(config, 'bakta', 'full')
-
-
-def test_install_requires_environment_and_installer_executable(tmp_path):
-    _, config = make_config(tmp_path)
-    with pytest.raises(BioenvError, match='No valid Conda environment'):
-        database_install_plan(config, 'bakta', 'full')
-    create_environment(config, installer=False)
-    with pytest.raises(BioenvError, match='installer executable is missing'):
-        database_install_plan(config, 'bakta', 'full')
-
-
-def test_install_command_failure_reports_partial_location_without_deleting(tmp_path, monkeypatch):
-    _, config = make_config(tmp_path)
-    create_environment(config)
-    destination = Path(config['settings']['databases_root']) / 'bakta' / 'full'
-
-    def failed_run(*args, **kwargs):
-        destination.mkdir(parents=True)
-        raise subprocess.CalledProcessError(17, args[0])
-
-    monkeypatch.setattr('bioenv.manager.subprocess.run', failed_run)
-    with pytest.raises(BioenvError, match='partial data may remain'):
-        install_database(config, 'bakta', 'full')
-    assert destination.is_dir()
-
-
-def test_install_reports_success_without_expected_directory(tmp_path, monkeypatch):
-    _, config = make_config(tmp_path)
-    create_environment(config)
-    monkeypatch.setattr('bioenv.manager.subprocess.run', lambda *args, **kwargs: None)
-    with pytest.raises(BioenvError, match='expected accessible directory is missing'):
-        install_database(config, 'bakta', 'full')
-
-
-def test_install_dry_run_shows_command_and_directories_without_changes(
-    tmp_path, monkeypatch, capsys,
-):
-    config_path, config = make_config(tmp_path, database_path='new/nested/full')
-    prefix = create_environment(config)
-    before = set(tmp_path.rglob('*'))
-    monkeypatch.setattr(
-        'bioenv.manager.subprocess.run',
-        lambda *args, **kwargs: pytest.fail('dry-run must not run micromamba'),
-    )
-    plan = install_database(config, 'bakta', 'full', dry_run=True)
-    assert set(tmp_path.rglob('*')) == before
-    assert plan['command'][3] == str(prefix)
-    assert plan['directories'] == [
-        Path(config['settings']['databases_root']),
-        Path(config['settings']['databases_root']) / 'new',
-        Path(config['settings']['databases_root']) / 'new' / 'nested',
-    ]
-    assert main([
-        '--config', str(config_path), 'db', 'install', 'bakta', 'full', '--dry-run'
-    ]) == 0
-    output = capsys.readouterr().out
-    assert f'Path: {plan["path"]}' in output
-    assert 'Directories to create:' in output
-    assert 'Micromamba: ' in output
-    assert set(tmp_path.rglob('*')) == before
-
-
-def test_managed_install_rejects_absolute_path_outside_databases_root(tmp_path):
-    _, config = make_config(tmp_path, database_path=str(tmp_path / 'outside'))
-    create_environment(config)
-    with pytest.raises(BioenvError, match='must stay within settings.databases_root'):
-        database_install_plan(config, 'bakta', 'full')
-
-
-def test_managed_install_rejects_databases_root_as_destination(tmp_path):
-    _, config = make_config(tmp_path)
-    create_environment(config)
-    config['tools']['bakta']['databases'][0]['path'] = config['settings']['databases_root']
-    with pytest.raises(BioenvError, match='cannot use databases_root as the destination'):
-        database_install_plan(config, 'bakta', 'full')
-
-
-def test_optional_database_check_keeps_existing_semantics(tmp_path):
-    _, config = make_config(tmp_path, install=False, required=False)
-    create_environment(config)
-    publish(config, 'bakta')
-    ok, label = check_database(config, 'bakta', 'full')
-    assert ok and 'not installed' in label
-    assert all(ok for ok, _ in check(config, 'bakta'))
-
-
-def test_required_database_check_fails_when_missing_and_passes_when_accessible(tmp_path):
-    _, config = make_config(tmp_path, install=False, required=True)
-    ok, label = check_database(config, 'bakta', 'full')
-    assert not ok and 'not installed' in label
-    destination = Path(config['settings']['databases_root']) / 'bakta' / 'full'
-    destination.mkdir(parents=True)
-    ok, label = check_database(config, 'bakta', 'full')
-    assert ok and 'available' in label
-
-
-def test_database_check_cli_reports_required_state(tmp_path, capsys):
-    config_path, config = make_config(tmp_path, install=False, required=True)
-    assert main(['--config', str(config_path), 'db', 'check', 'bakta', 'full']) == 1
-    assert 'FAIL' in capsys.readouterr().out
-    destination = Path(config['settings']['databases_root']) / 'bakta' / 'full'
-    destination.mkdir(parents=True)
-    assert main(['--config', str(config_path), 'db', 'check', 'bakta', 'full']) == 0
-    assert 'OK' in capsys.readouterr().out
-
-
-def test_absolute_legacy_database_path_needs_no_databases_root(tmp_path):
-    config_path, _ = make_config(tmp_path, database_path=str(tmp_path / 'legacy'), install=False)
-    raw_config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
-    raw_config['settings'].pop('databases_root')
-    config_path.write_text(yaml.safe_dump(raw_config), encoding='utf-8')
-    config = load_config(config_path)
-    assert check_database(config, 'bakta', 'full')[0] is False
-
-
-@pytest.mark.parametrize(('key', 'kind'), [('file', 'file'), ('source', 'directory')])
-def test_local_database_origins_substitute_absolute_paths(tmp_path, key, kind):
-    _, config = make_config(tmp_path)
-    create_environment(config)
-    origin = tmp_path / 'origin with spaces'
-    if kind == 'file':
-        origin.write_text('payload')
-        config['tools']['bakta']['databases'][0]['install'].append('{file}')
-    else:
-        origin.mkdir()
-        config['tools']['bakta']['databases'][0]['install'].append('{source}')
-    plan = database_install_plan(config, 'bakta', 'full', **{key: origin})
-    assert str(origin.resolve()) in plan['command']
-    assert plan[key] == str(origin.resolve())
-
-
-def test_local_database_origin_requirements_and_types(tmp_path):
-    _, config = make_config(tmp_path)
-    create_environment(config)
-    config['tools']['bakta']['databases'][0]['install'].append('{file}')
-    with pytest.raises(BioenvError, match='requires --file'):
-        database_install_plan(config, 'bakta', 'full')
-    with pytest.raises(BioenvError, match='existing file'):
-        database_install_plan(config, 'bakta', 'full', file=tmp_path / 'missing')
+def test_file_import_requires_existing_file(tmp_path):
+    _, config = make_config(tmp_path, kind='file')
+    with pytest.raises(BioenvError, match='does not exist'):
+        import_database(config, 'tool', 'db', file=tmp_path / 'missing')
     directory = tmp_path / 'directory'
     directory.mkdir()
-    with pytest.raises(BioenvError, match='existing file'):
-        database_install_plan(config, 'bakta', 'full', file=directory)
+    with pytest.raises(BioenvError, match='accessible file'):
+        import_database(config, 'tool', 'db', file=directory)
 
 
-def test_local_source_directory_requirements_and_type(tmp_path):
+def test_import_rejects_existing_destination(tmp_path):
     _, config = make_config(tmp_path)
-    create_environment(config)
-    config['tools']['bakta']['databases'][0]['install'].append('{source}')
-    with pytest.raises(BioenvError, match='requires --source'):
-        database_install_plan(config, 'bakta', 'full')
-    with pytest.raises(BioenvError, match='existing directory'):
-        database_install_plan(config, 'bakta', 'full', source=tmp_path / 'missing')
-    file = tmp_path / 'file'
-    file.touch()
-    with pytest.raises(BioenvError, match='existing directory'):
-        database_install_plan(config, 'bakta', 'full', source=file)
+    source = tmp_path / 'source'
+    source.mkdir()
+    destination = tmp_path / 'databases' / 'tool' / 'db'
+    destination.mkdir(parents=True)
+    with pytest.raises(BioenvError, match='already exists'):
+        import_database(config, 'tool', 'db', source=source)
 
 
-def test_local_origin_cli_dry_run_is_read_only(tmp_path, monkeypatch, capsys):
+def test_import_rejects_path_outside_root(tmp_path):
+    _, config = make_config(tmp_path, path=str(tmp_path / 'outside' / 'db'))
+    source = tmp_path / 'source'
+    source.mkdir()
+    with pytest.raises(BioenvError, match='must stay within settings.databases_root'):
+        import_database(config, 'tool', 'db', source=source)
+
+
+def test_import_rejects_destination_symlink_escape(tmp_path):
+    _, config = make_config(tmp_path)
+    root = Path(config['settings']['databases_root'])
+    root.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (root / 'tool').symlink_to(outside, target_is_directory=True)
+    source = tmp_path / 'source'
+    source.mkdir()
+    with pytest.raises(BioenvError, match='escapes settings.databases_root'):
+        import_database(config, 'tool', 'db', source=source)
+
+
+def test_import_rejects_inaccessible_source(tmp_path, monkeypatch):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    source.mkdir()
+    monkeypatch.setattr('bioenv.manager.os.access', lambda *args: False)
+    with pytest.raises(BioenvError, match='not accessible'):
+        import_database(config, 'tool', 'db', source=source)
+
+
+def test_import_rejects_symlinks_in_source_tree(tmp_path):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    source.mkdir()
+    outside = tmp_path / 'outside'
+    outside.write_text('outside')
+    (source / 'link').symlink_to(outside)
+    with pytest.raises(BioenvError, match='Symbolic links are not allowed'):
+        import_database(config, 'tool', 'db', source=source)
+    assert not (tmp_path / 'databases' / 'tool' / 'db').exists()
+
+
+def test_import_rejects_source_root_symlink(tmp_path):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    source.mkdir()
+    link = tmp_path / 'link'
+    link.symlink_to(source, target_is_directory=True)
+    with pytest.raises(BioenvError, match='Symbolic links are not allowed'):
+        import_database(config, 'tool', 'db', source=link)
+
+
+def test_import_rejects_source_inside_its_destination(tmp_path):
+    _, config = make_config(tmp_path)
+    destination = tmp_path / 'databases' / 'tool' / 'db'
+    source = destination / 'prepared'
+    source.mkdir(parents=True)
+    with pytest.raises(BioenvError, match='into itself'):
+        import_database(config, 'tool', 'db', source=source)
+
+
+def test_import_dry_run_has_no_side_effects(tmp_path, capsys):
     config_path, config = make_config(tmp_path)
-    create_environment(config)
-    origin = tmp_path / 'db light.tar.xz'
-    origin.write_text('payload')
-    config['tools']['bakta']['databases'][0]['install'].append('{file}')
-    raw = yaml.safe_load(config_path.read_text(encoding='utf-8'))
-    raw['tools']['bakta']['databases'][0]['install'].append('{file}')
-    config_path.write_text(yaml.safe_dump(raw), encoding='utf-8')
+    source = tmp_path / 'prepared'
+    source.mkdir()
     before = set(tmp_path.rglob('*'))
-    monkeypatch.setattr('bioenv.manager.subprocess.run',
-                        lambda *args, **kwargs: pytest.fail('dry run executed installer'))
-    assert main(['--config', str(config_path), 'db', 'install', 'bakta', 'full',
-                 '--file', str(origin), '--dry-run']) == 0
+    assert main(['--config', str(config_path), 'db', 'import', 'tool', 'db',
+                 '--source', str(source), '--dry-run']) == 0
     output = capsys.readouterr().out
-    assert f'File: {origin.resolve()}' in output
-    assert str(origin.resolve()) in output
+    assert f'Source: {source}' in output
+    assert 'Destination:' in output
     assert set(tmp_path.rglob('*')) == before
+
+
+def test_copy_failure_does_not_leave_destination(tmp_path, monkeypatch):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data').write_text('data')
+
+    def fail_copy(*args, **kwargs):
+        staged = args[1]
+        (Path(staged) / 'partial').write_text('partial')
+        raise OSError('copy failed')
+
+    monkeypatch.setattr('bioenv.manager.shutil.copytree', fail_copy)
+    with pytest.raises(BioenvError, match='Could not import database'):
+        import_database(config, 'tool', 'db', source=source)
+    assert not (tmp_path / 'databases' / 'tool' / 'db').exists()
+    assert (source / 'data').read_text() == 'data'
+
+
+def test_check_distinguishes_directory_and_file_and_optional_required(tmp_path):
+    _, config = make_config(tmp_path)
+    ok, label = check_database(config, 'tool', 'db')
+    assert not ok and 'not installed' in label
+    config['tools']['tool']['databases'][0]['required'] = False
+    assert check_database(config, 'tool', 'db')[0]
+    (tmp_path / 'databases' / 'tool' / 'db').mkdir(parents=True)
+    assert check_database(config, 'tool', 'db')[0]
+    config['tools']['tool']['databases'][0]['type'] = 'file'
+    assert not check_database(config, 'tool', 'db')[0]
+
+
+def test_database_catalog_rejects_install_and_invalid_type(tmp_path):
+    config_path, _ = make_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    raw['tools']['tool']['databases'][0]['install'] = ['installer']
+    config_path.write_text(yaml.safe_dump(raw), encoding='utf-8')
+    with pytest.raises(ConfigError, match='Unknown Tool.*setting'):
+        load_config(config_path)
+    raw['tools']['tool']['databases'][0].pop('install')
+    raw['tools']['tool']['databases'][0]['type'] = 'archive'
+    config_path.write_text(yaml.safe_dump(raw), encoding='utf-8')
+    with pytest.raises(ConfigError, match='type must be directory or file'):
+        load_config(config_path)

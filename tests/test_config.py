@@ -36,7 +36,7 @@ def test_database_schema_accepts_relative_and_legacy_absolute_paths(tmp_path):
         f'settings:\n  databases_root: {tmp_path}/dbs\n'
         'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
         '    databases:\n      - name: managed\n        path: foo/db\n'
-        '        env: FOO_DB\n        install: [foo-db, install, "{path}"]\n'
+        '        env: FOO_DB\n'
         f'      - name: legacy\n        path: {tmp_path}/legacy-db\n', encoding='utf-8'
     )
     config = load_config(config_file)
@@ -77,14 +77,14 @@ def test_relative_database_path_requires_databases_root(tmp_path):
         load_config(config_file)
 
 
-def test_database_path_markers_are_reserved_for_install_arguments(tmp_path):
+def test_database_type_is_limited_to_file_or_directory(tmp_path):
     config_file = tmp_path / 'database.yaml'
     config_file.write_text(
         f'settings:\n  databases_root: {tmp_path}/dbs\n'
         'tools:\n  foo:\n    package: foo\n    commands: [foo]\n'
-        '    databases: [{name: db, path: "{root}/db"}]\n', encoding='utf-8'
+        '    databases: [{name: db, path: db, type: archive}]\n', encoding='utf-8'
     )
-    with pytest.raises(ConfigError, match='only valid in install'):
+    with pytest.raises(ConfigError, match='type must be directory or file'):
         load_config(config_file)
 
 

@@ -16,7 +16,7 @@ DEFAULT_SETTINGS = {
 }
 SETTING_KEYS = {*DEFAULT_SETTINGS, 'databases_root'}
 TOOL_KEYS = {'package', 'python', 'version', 'commands', 'environment', 'databases'}
-DATABASE_KEYS = {'name', 'path', 'env', 'required', 'install'}
+DATABASE_KEYS = {'name', 'path', 'env', 'required', 'type'}
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -140,10 +140,6 @@ def _validate_database(name, database, databases_root):
     path_value = database.get('path')
     if not isinstance(path_value, str) or not path_value:
         raise ConfigError(f'Tool {name!r} database {database_name!r}: path must be a string')
-    if re.search(r'\{(?:root|path|parent|file|source)\}', path_value):
-        raise ConfigError(
-            f'Tool {name!r} database {database_name!r}: path markers are only valid in install'
-        )
     path = Path(path_value)
     if path.is_absolute():
         _absolute_path(path_value, f'Tool {name!r} database path')
@@ -158,15 +154,10 @@ def _validate_database(name, database, databases_root):
         raise ConfigError(f'Tool {name!r} database {database_name!r}: invalid env variable')
     if database.get('required', False) is not True and database.get('required', False) is not False:
         raise ConfigError(f'Tool {name!r} database {database_name!r}: required must be boolean')
-    if 'install' in database:
-        arguments = database['install']
-        if not isinstance(arguments, list) or not arguments or any(
-            not isinstance(argument, str) or '\0' in argument for argument in arguments
-        ) or not NAME.fullmatch(arguments[0]):
-            raise ConfigError(
-                f'Tool {name!r} database {database_name!r}: install must be a non-empty '
-                'argument list starting with a simple executable name'
-            )
+    if database.get('type', 'directory') not in ('directory', 'file'):
+        raise ConfigError(
+            f'Tool {name!r} database {database_name!r}: type must be directory or file'
+        )
 
 
 def _validate_databases(name, value, databases_root, environment):

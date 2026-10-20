@@ -20,13 +20,6 @@ tools:
         path: bakta/db
         env: BAKTA_DB
         required: true
-        install:
-          - bakta_db
-          - download
-          - --output
-          - "{parent}"
-          - --type
-          - full
 
   spades:
     package: spades
@@ -40,3 +33,8 @@ tools:
       - kraken2
       - kraken2-build
       - kraken2-inspect
+    databases:
+      - name: standard
+        path: kraken2/standard
+        env: KRAKEN2_DB
+        required: false

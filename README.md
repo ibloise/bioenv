@@ -4,7 +4,7 @@ A small Python CLI for managing shared Micromamba bioinformatics tools on a mult
 Linux workstation.
 
 **Status: 0.4.0.** The CLI validates and inspects the catalog, manages tool environments,
-publishes selected launchers, and checks or installs declared databases.
+publishes selected launchers, and imports or checks prepared databases.
 
 ## Developer quick start
 
@@ -48,11 +48,11 @@ environment before running `pip`, if needed.
   environment. Use this mode to recover launchers left behind after an environment removal
   succeeded but launcher cleanup failed. `--dry-run` displays the planned Micromamba operation when applicable,
   launchers, missing resources and any conflicts without changing files or prompting.
-- `bioenv db check TOOL DATABASE` checks that a declared database directory is accessible.
-- `bioenv db install TOOL DATABASE` runs the database install arguments declared in the
-  catalog, through the tool's existing Micromamba environment. Optional `--file PATH` and
-  `--source DIR` pass local inputs to catalog commands using `{file}` or `{source}`. `--dry-run`
-  prints the target, origins, directories to create and exact command without changing files.
+- `bioenv db check TOOL DATABASE` checks the configured database path, expected type and
+  accessibility.
+- `bioenv db import TOOL DATABASE --source DIR` copies a prepared database directory into
+  managed storage. Use `--file FILE` for a configured file database. `--dry-run` validates
+  and prints source and destination without changing files.
 
 ```bash
 bioenv --config /etc/bioenv/tools.yaml update fastqc --dry-run
@@ -61,71 +61,44 @@ sudo bioenv --config /etc/bioenv/tools.yaml update fastqc
 bioenv --config /etc/bioenv/tools.yaml remove fastqc --dry-run
 sudo bioenv --config /etc/bioenv/tools.yaml remove fastqc
 sudo bioenv --config /etc/bioenv/tools.yaml remove fastqc --launchers-only --yes
-bioenv --config /etc/bioenv/tools.yaml db check bakta full
-bioenv --config /etc/bioenv/tools.yaml db install bakta full --dry-run
-sudo bioenv --config /etc/bioenv/tools.yaml db install bakta full
-sudo bioenv --config /etc/bioenv/tools.yaml db install bakta light --file '/mnt/downloads/db-light.tar.xz'
+sudo bioenv --config /etc/bioenv/tools.yaml db import kraken2 standard --source /mnt/staging/standard
+bioenv --config /etc/bioenv/tools.yaml db check kraken2 standard
 ```
 
-Databases use the existing per-tool catalog. Relative `path` values are resolved beneath
-`settings.databases_root`; absolute paths remain supported for checking and launcher
-environment variables. An optional database `env` is exported by each launcher, so installing
-the database later does not require publishing launchers again. For example, the Bakta entry
-in `config/tools.example.yaml` maps `BAKTA_DB` to `bakta/db` and declares `bakta_db download`
-arguments. `db install` runs only an explicitly declared argument list, uses the absolute
-installer executable from the tool environment, and refuses an existing destination or a
-target outside `databases_root`. It does not install databases automatically with `install`,
-download files itself, update/remove databases, track their versions, or validate their
-contents. If an installer fails or does not create the expected directory, inspect any partial
-data manually; bioenv does not delete it or roll back the operation. Downloads must be obtained
-externally: bioenv does not manage FTP, HTTP, checksums or resumed downloads. A declared
-`{file}` argument requires `--file`; `{source}` requires `--source`. Supplying either option to
-a procedure that does not consume it is an error. Origins may be relative paths (resolved from
-the current working directory) and are never copied, moved or removed by bioenv.
+Database paths use the per-tool catalog. Relative `path` values resolve beneath
+`settings.databases_root`; absolute paths remain available for checks and launcher variables.
+The default type is `directory`; use `type: file` for a single file, whose configured `path`
+is its final filename. Each declared `env` is exported by published launchers. Bioenv copies
+prepared input without unpacking or interpreting it, refuses occupied destinations and paths
+outside the managed root, and never changes the source. Symbolic links are rejected both as
+the source and anywhere inside a source directory. Bioenv checks only existence, type and
+accessibility; it does not guarantee that a database is biologically valid or usable.
 
-The database portion of that catalog entry is:
+For Kraken2, build the database yourself with Kraken2's tools in a staging directory, then
+import that prepared directory and check its configured location:
 
 ```yaml
 settings:
   databases_root: /mnt/2TB_HD/Databases
 
 tools:
-  bakta:
+  kraken2:
     databases:
-      - name: full
-        path: bakta/db
-        env: BAKTA_DB
-        required: true
-        install: [bakta_db, download, --output, "{parent}", --type, full]
+      - name: standard
+        path: kraken2/standard
+        env: KRAKEN2_DB
+        required: false
 ```
-
-This automatic procedure is run without a local origin:
 
 ```bash
-bioenv db install bakta full
+kraken2-build --download-taxonomy --db /mnt/staging/standard
+kraken2-build --download-library bacteria --db /mnt/staging/standard
+kraken2-build --build --db /mnt/staging/standard
+bioenv db import kraken2 standard --source /mnt/staging/standard --dry-run
+sudo bioenv --config /etc/bioenv/tools.yaml db import kraken2 standard --source /mnt/staging/standard
+bioenv --config /etc/bioenv/tools.yaml db check kraken2 standard
+kraken2 --db /mnt/2TB_HD/Databases/kraken2/standard --threads 8 reads.fastq
 ```
-
-For an administrator-downloaded archive, declare an installer procedure that consumes
-`{file}`, for example:
-
-```yaml
-install: [bakta_db, install, --db-file, "{file}", --output, "{parent}"]
-```
-
-Then run:
-
-```bash
-bioenv db install bakta light --file /ruta/db-light.tar.xz
-```
-
-Kraken2 builds that need multiple preparation/build commands are not represented as workflows.
-In particular, `db install` refuses an existing destination, so preparing input files in the
-final database directory and then building there is outside this command; perform that setup
-manually and do not use `db install` over the existing directory.
-
-For a manual Bakta installation, first run `bioenv db check bakta full` and inspect the
-configured target. Review `bioenv db install bakta full --dry-run`, then run the install only
-when the final `BAKTA_DB` path is not already present; bioenv refuses to overwrite it.
 
 Declaring a tool in the administrator-controlled catalog grants bioenv authority to
 administer the matching `<envs_root>/<tool>` prefix, including environments originally
@@ -196,10 +169,9 @@ and file, and prepare the shared storage paths with appropriate ownership and ac
 - `settings.bin_dir` must be writable by the account running `publish`. `bioenv` tries
   to create this directory if it is missing; for the shared default `/usr/local/bin`,
   have an administrator create and protect it.
-- Any required database directory must already be mounted or populated and readable by
-  the users running the tool. `db install` may create `settings.databases_root` and directories
-  along the target path; make that root writable by the installing administrator. It
-  executes only the install arguments declared by the catalog.
+- Any required database path must already be mounted or populated and accessible by
+  the users running the tool. `db import` may create `settings.databases_root` and directories
+  along the target path; make that root writable by the importing administrator.
 
 ## Security notes
 
@@ -227,5 +199,5 @@ and file, and prepare the shared storage paths with appropriate ownership and ac
 - One stable shared environment per tool: `/opt/bioinformatics/envs/<tool>`.
 - Only explicitly listed commands are exported; never publish everything in `bin/`.
 - Runtime variables such as `BAKTA_DB` belong to the catalog.
-- Database installation is explicit and databases are never automatically updated or deleted.
+- Databases are prepared externally; Bioenv only imports and checks their configured paths.
 - Existing unrelated files and symlinks in the launcher directory are not replaced.

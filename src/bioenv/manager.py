@@ -3,8 +3,8 @@
 import fcntl
 import json
 import os
-import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -64,6 +64,8 @@ def _resolved_database_path(config, database):
         resolved_root = root.resolve(strict=False)
         resolved_path = (root / configured).resolve(strict=False)
         resolved_path.relative_to(resolved_root)
+    except BioenvError:
+        raise
     except ValueError as exc:
         raise BioenvError(
             f'Relative database path escapes settings.databases_root: {configured}'
@@ -76,21 +78,23 @@ def _resolved_database_path(config, database):
 def _managed_database_path(config, database):
     root_value = config['settings'].get('databases_root')
     if root_value is None:
-        raise BioenvError('Managed database installation requires settings.databases_root')
+        raise BioenvError('Database import requires settings.databases_root')
     try:
         root = Path(root_value).resolve(strict=False)
         path = _resolved_database_path(config, database).resolve(strict=False)
         if not path.relative_to(root).parts:
             raise BioenvError(
-                'Managed database installation cannot use databases_root as the destination'
+                'Database destination cannot be settings.databases_root itself'
             )
+    except BioenvError:
+        raise
     except ValueError as exc:
         raise BioenvError(
-            f'Managed database installation must stay within settings.databases_root: '
+            f'Database destination must stay within settings.databases_root: '
             f'{database["path"]}'
         ) from exc
     except (OSError, RuntimeError) as exc:
-        raise BioenvError(f'Cannot safely resolve database install path: {exc}') from exc
+        raise BioenvError(f'Cannot safely resolve database destination: {exc}') from exc
     return root, path
 
 
@@ -599,12 +603,16 @@ def check(config, tool):
 
 def _database_check(config, tool, database):
     db_path = _resolved_database_path(config, database)
-    exists = db_path.is_dir()
+    kind = database.get('type', 'directory')
+    exists = db_path.is_file() if kind == 'file' else db_path.is_dir()
     required = database.get('required', False)
-    readable = exists and os.access(db_path, os.R_OK | os.X_OK)
-    ok = readable or (not required and not exists)
+    readable = exists and os.access(db_path, os.R_OK | (0 if kind == 'file' else os.X_OK))
+    path_exists = db_path.exists() or db_path.is_symlink()
+    ok = readable or (not required and not path_exists)
     state = 'required database' if required else 'optional database'
-    detail = 'available' if readable else ('not installed' if not exists else 'not readable')
+    detail = 'available' if readable else (
+        'not installed' if not path_exists else ('wrong type' if not exists else 'not accessible')
+    )
     return ok, f'{state} {database["name"]} {detail}: {db_path}'
 
 
@@ -613,128 +621,78 @@ def check_database(config, tool, database_name):
     return _database_check(config, tool, database)
 
 
-def database_install_plan(config, tool, database_name, file=None, source=None):
+def _reject_source_symlinks(source):
+    if source.is_symlink():
+        raise BioenvError(f'Symbolic links are not allowed in import sources: {source}')
+    if source.is_dir():
+        for path in source.rglob('*'):
+            if path.is_symlink():
+                raise BioenvError(f'Symbolic links are not allowed in import sources: {path}')
+
+
+def database_import_plan(config, tool, database_name, file=None, source=None):
     database = _database_spec(config, tool, database_name)
-    if 'install' not in database:
-        raise BioenvError(
-            f'Database {database_name!r} for {tool!r} has no declared install procedure'
-        )
-    if file is not None and source is not None:
-        raise BioenvError('Provide only one of --file or --source')
-    markers = set(re.findall(
-        r'\{(root|path|parent|file|source)\}', '\n'.join(database['install'][1:])
-    ))
-    if file is not None and 'file' not in markers:
-        raise BioenvError('A local --file was provided but the installer does not use {file}')
-    if source is not None and 'source' not in markers:
-        raise BioenvError('A local --source was provided but the installer does not use {source}')
-    if 'file' in markers and file is None:
-        raise BioenvError('This database installer requires --file because it uses {file}')
-    if 'source' in markers and source is None:
-        raise BioenvError('This database installer requires --source because it uses {source}')
-    resolved_origins = {}
-    for key, value, kind in (('file', file, 'file'), ('source', source, 'directory')):
-        if value is None:
-            continue
-        origin = Path(value).resolve()
-        if not (origin.is_file() if kind == 'file' else origin.is_dir()):
-            raise BioenvError(f'Local --{key} must be an existing {kind}: {value}')
-        if not os.access(origin, os.R_OK):
-            raise BioenvError(f'Local --{key} is not accessible: {origin}')
-        resolved_origins[key] = str(origin)
-    prefix, _ = paths(config, tool)
-    if prefix.is_symlink():
-        raise BioenvError(f'Refusing to use environment path because it is a symlink: {prefix}')
-    if not prefix.is_dir() or not (prefix / 'conda-meta' / 'history').is_file():
-        raise BioenvError(f'No valid Conda environment for {tool!r} at {prefix}')
+    if (file is None) == (source is None):
+        raise BioenvError('Provide exactly one of --file or --source')
+    kind = database.get('type', 'directory')
+    raw_origin = Path(file if file is not None else source).expanduser()
+    expected_origin = 'file' if file is not None else 'directory'
+    if raw_origin.is_symlink():
+        raise BioenvError(f'Symbolic links are not allowed as import sources: {raw_origin}')
+    origin = raw_origin.resolve(strict=False)
+    if not origin.exists():
+        raise BioenvError(f'Import source does not exist: {origin}')
+    if (origin.is_file() if expected_origin == 'file' else origin.is_dir()) is False:
+        raise BioenvError(f'Import source must be an accessible {expected_origin}: {origin}')
+    access = os.R_OK | (os.X_OK if expected_origin == 'directory' else 0)
+    if not os.access(origin, access):
+        raise BioenvError(f'Import source is not accessible: {origin}')
+    _reject_source_symlinks(origin)
+    if (kind == 'file') != (file is not None):
+        option = '--file' if kind == 'file' else '--source'
+        raise BioenvError(f'Database {database_name!r} is configured as a {kind}; use {option}')
     root, destination = _managed_database_path(config, database)
-    if destination.exists() or destination.is_symlink():
-        raise BioenvError(f'Database destination already exists; refusing to overwrite: {destination}')
-    executable_name = database['install'][0]
-    executable = prefix / ENVIRONMENT_BIN / executable_name
-    if not _is_executable(executable):
-        raise BioenvError(f'Database installer executable is missing or not executable: {executable}')
-    substitutions = {
-        '{root}': str(root),
-        '{path}': str(destination),
-        '{parent}': str(destination.parent),
-        **{f'{{{key}}}': value for key, value in resolved_origins.items()},
-    }
-    marker = re.compile(r'\{(?:root|path|parent|file|source)\}')
-    arguments = [marker.sub(lambda match: substitutions[match.group()], value)
-                 for value in database['install'][1:]]
-    command = [
-        config['settings']['micromamba'], RUN_COMMAND, PREFIX_OPTION, str(prefix),
-        str(executable), *arguments,
-    ]
-    missing_directories = []
-    parent = destination.parent
-    cursor = parent
-    while not cursor.exists():
-        missing_directories.append(cursor)
-        if cursor.parent == cursor:
-            break
-        cursor = cursor.parent
-    missing_directories.reverse()
-    return {
-        'tool': tool,
-        'database': database_name,
-        'root': root,
-        'path': destination,
-        'file': resolved_origins.get('file'),
-        'source': resolved_origins.get('source'),
-        'command': command,
-        'directories': missing_directories,
-    }
+    try:
+        if source is not None and destination.parent.resolve(strict=False).is_relative_to(origin):
+            raise BioenvError('Cannot import a directory into itself or one of its descendants')
+        if source is not None and origin.is_relative_to(destination):
+            raise BioenvError('Cannot import a directory into itself or one of its descendants')
+        if destination.exists() or destination.is_symlink():
+            raise BioenvError(f'Database destination already exists: {destination}')
+    except BioenvError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise BioenvError(f'Cannot safely validate database import paths: {exc}') from exc
+    return {'tool': tool, 'database': database_name, 'source': origin,
+            'path': destination, 'type': kind, 'root': root}
 
 
-def install_database(config, tool, database_name, dry_run=False, file=None, source=None):
+def import_database(config, tool, database_name, file=None, source=None, dry_run=False):
+    plan = database_import_plan(config, tool, database_name, file=file, source=source)
     if dry_run:
-        return database_install_plan(config, tool, database_name, file=file, source=source)
-    with _environment_lock(config, tool):
-        plan = database_install_plan(config, tool, database_name, file=file, source=source)
-        destination = plan['path']
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise BioenvError(
-                f'Cannot create database parent directory {destination.parent}: {exc}'
-            ) from exc
-        # Re-resolve after creating parents so a newly introduced symlink cannot escape root.
-        plan = database_install_plan(config, tool, database_name, file=file, source=source)
-        destination = plan['path']
-        env = os.environ.copy()
-        env[MICROMAMBA_ROOT_ENV] = config['settings']['mamba_root']
-        try:
-            subprocess.run(plan['command'], env=env, check=True)
-        except subprocess.CalledProcessError as exc:
-            raise BioenvError(
-                f'Micromamba failed to install database {database_name!r} for {tool!r} '
-                f'(exit status {exc.returncode}); partial data may remain at {destination}. '
-                'Inspect or clean it manually before retrying.'
-            ) from exc
-        except KeyboardInterrupt as exc:
-            raise BioenvError(
-                f'Database installation for {tool!r}/{database_name!r} was interrupted; '
-                f'partial data may remain at {destination}. Inspect it manually.'
-            ) from exc
-        except OSError as exc:
-            raise BioenvError(
-                f'Could not run Micromamba at {config["settings"]["micromamba"]}: {exc}; '
-                f'partial data may remain at {destination}.'
-            ) from exc
-        try:
-            resolved_root = Path(plan['root']).resolve(strict=False)
-            resolved_destination = destination.resolve(strict=False)
-            resolved_destination.relative_to(resolved_root)
-        except (ValueError, OSError, RuntimeError) as exc:
-            raise BioenvError(
-                f'Database installer created a path outside databases_root or an unsafe link: '
-                f'{destination}'
-            ) from exc
-        if not destination.is_dir() or not os.access(destination, os.R_OK | os.X_OK):
-            raise BioenvError(
-                f'Database installer completed but the expected accessible directory is missing: '
-                f'{destination}'
-            )
         return plan
+    destination = plan['path']
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Revalidate after parent creation to catch symlinked paths introduced meanwhile.
+        plan = database_import_plan(config, tool, database_name, file=file, source=source)
+        destination = plan['path']
+        if plan['type'] == 'directory':
+            with tempfile.TemporaryDirectory(prefix='.bioenv-import-', dir=destination.parent) as temp:
+                staged = Path(temp) / 'payload'
+                shutil.copytree(plan['source'], staged, symlinks=False)
+                os.replace(staged, destination)
+        else:
+            fd, temp_name = tempfile.mkstemp(prefix='.bioenv-import-', dir=destination.parent)
+            os.close(fd)
+            staged = Path(temp_name)
+            try:
+                shutil.copy2(plan['source'], staged)
+                os.replace(staged, destination)
+            finally:
+                staged.unlink(missing_ok=True)
+    except BioenvError:
+        raise
+    except OSError as exc:
+        raise BioenvError(f'Could not import database to {destination}: {exc}') from exc
+    return plan
