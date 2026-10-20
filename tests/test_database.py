@@ -1,3 +1,6 @@
+import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -5,7 +8,7 @@ import yaml
 
 from bioenv.cli import main
 from bioenv.config import ConfigError, load_config
-from bioenv.manager import BioenvError, check_database, import_database
+from bioenv.manager import BioenvError, _copy_file_no_follow, check_database, import_database
 
 
 def make_config(tmp_path, *, path='tool/db', kind='directory', required=True):
@@ -54,8 +57,6 @@ def test_source_option_requires_existing_directory(tmp_path, source_kind):
     source = tmp_path / 'source'
     if source_kind == 'file':
         source.touch()
-    elif source_kind == 'directory':
-        source.mkdir()
     with pytest.raises(BioenvError, match='does not exist|must be an accessible directory'):
         import_database(config, 'tool', 'db', source=source)
 
@@ -76,6 +77,26 @@ def test_file_import_requires_existing_file(tmp_path):
     directory.mkdir()
     with pytest.raises(BioenvError, match='accessible file'):
         import_database(config, 'tool', 'db', file=directory)
+
+
+def test_file_symlink_swap_during_import_is_not_followed(tmp_path, monkeypatch):
+    _, config = make_config(tmp_path, kind='file')
+    source = tmp_path / 'source.bin'
+    source.write_text('prepared')
+    outside = tmp_path / 'outside.bin'
+    outside.write_text('outside')
+    real_copy = _copy_file_no_follow
+
+    def swap_for_symlink(origin, staged):
+        Path(origin).unlink()
+        Path(origin).symlink_to(outside)
+        return real_copy(origin, staged)
+
+    monkeypatch.setattr('bioenv.manager._copy_file_no_follow', swap_for_symlink)
+    with pytest.raises(BioenvError, match='Could not import database'):
+        import_database(config, 'tool', 'db', file=source)
+    assert not (Path(config['settings']['databases_root']) / 'tool' / 'db').exists()
+    assert outside.read_text() == 'outside'
 
 
 def test_import_rejects_existing_destination(tmp_path):
@@ -150,7 +171,7 @@ def test_import_rejects_source_inside_its_destination(tmp_path):
 
 
 def test_import_dry_run_has_no_side_effects(tmp_path, capsys):
-    config_path, config = make_config(tmp_path)
+    config_path, _config = make_config(tmp_path)
     source = tmp_path / 'prepared'
     source.mkdir()
     before = set(tmp_path.rglob('*'))
@@ -162,22 +183,113 @@ def test_import_dry_run_has_no_side_effects(tmp_path, capsys):
     assert set(tmp_path.rglob('*')) == before
 
 
-def test_copy_failure_does_not_leave_destination(tmp_path, monkeypatch):
+@pytest.mark.parametrize('failure', [OSError('copy failed'), shutil.Error('copy failed')])
+def test_copy_failure_does_not_leave_destination_or_change_source(tmp_path, monkeypatch, failure):
     _, config = make_config(tmp_path)
     source = tmp_path / 'source'
     source.mkdir()
     (source / 'data').write_text('data')
 
+    original_files = {path.relative_to(source): path.read_bytes()
+                      for path in source.rglob('*') if path.is_file()}
+
     def fail_copy(*args, **kwargs):
         staged = args[1]
+        Path(staged).mkdir()
         (Path(staged) / 'partial').write_text('partial')
-        raise OSError('copy failed')
+        raise failure
 
     monkeypatch.setattr('bioenv.manager.shutil.copytree', fail_copy)
     with pytest.raises(BioenvError, match='Could not import database'):
         import_database(config, 'tool', 'db', source=source)
     assert not (tmp_path / 'databases' / 'tool' / 'db').exists()
-    assert (source / 'data').read_text() == 'data'
+    assert {path.relative_to(source): path.read_bytes()
+            for path in source.rglob('*') if path.is_file()} == original_files
+
+
+def test_concurrent_imports_publish_only_one_complete_database(tmp_path):
+    _, config = make_config(tmp_path)
+    sources = [tmp_path / 'source-a', tmp_path / 'source-b']
+    for value, source in zip((b'a', b'b'), sources):
+        source.mkdir()
+        (source / 'payload').write_bytes(value)
+    barrier = threading.Barrier(2)
+
+    def run(source):
+        barrier.wait()
+        try:
+            import_database(config, 'tool', 'db', source=source)
+            return 'imported'
+        except BioenvError:
+            return 'occupied'
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(run, sources))
+    assert sorted(results) == ['imported', 'occupied']
+    destination = tmp_path / 'databases' / 'tool' / 'db'
+    assert (destination / 'payload').read_bytes() in (b'a', b'b')
+    assert [(source / 'payload').read_bytes() for source in sources] == [b'a', b'b']
+
+
+@pytest.mark.parametrize('kind', ['directory', 'file'])
+def test_publish_conflict_does_not_replace_concurrent_destination(tmp_path, monkeypatch, kind):
+    is_file = kind == 'file'
+    _, config = make_config(tmp_path, path='tool/db.bin' if is_file else 'tool/db', kind=kind)
+    source = tmp_path / ('source.bin' if is_file else 'source')
+    if is_file:
+        source.write_text('prepared')
+        real_copy = _copy_file_no_follow
+
+        def occupy_after_copy(origin, staged, **kwargs):
+            real_copy(origin, staged, **kwargs)
+            Path(config['settings']['databases_root'], 'tool').mkdir(
+                parents=True, exist_ok=True
+            )
+            (Path(config['settings']['databases_root']) / 'tool' / 'db.bin').write_text('external')
+
+        monkeypatch.setattr('bioenv.manager._copy_file_no_follow', occupy_after_copy)
+    else:
+        source.mkdir()
+        (source / 'payload').write_text('prepared')
+        real_copytree = shutil.copytree
+
+        def occupy_after_copytree(origin, staged, **kwargs):
+            result = real_copytree(origin, staged, **kwargs)
+            (Path(config['settings']['databases_root']) / 'tool' / 'db').mkdir()
+            return result
+
+        monkeypatch.setattr('bioenv.manager.shutil.copytree', occupy_after_copytree)
+
+    with pytest.raises(BioenvError, match='already exists'):
+        import_database(config, 'tool', 'db', **({'file': source} if is_file else {'source': source}))
+    destination = Path(config['settings']['databases_root']) / 'tool' / ('db.bin' if is_file else 'db')
+    if is_file:
+        assert destination.read_text() == 'external'
+        assert source.read_text() == 'prepared'
+    else:
+        assert destination.is_dir() and list(destination.iterdir()) == []
+        assert (source / 'payload').read_text() == 'prepared'
+
+
+def test_import_rejects_symlink_added_while_copying(tmp_path, monkeypatch):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data').write_text('prepared')
+    outside = tmp_path / 'outside'
+    outside.write_text('outside')
+    real_copytree = shutil.copytree
+
+    def add_link_then_copy(origin, staged, **kwargs):
+        (Path(origin) / 'late-link').symlink_to(outside)
+        return real_copytree(origin, staged, **kwargs)
+
+    monkeypatch.setattr('bioenv.manager.shutil.copytree', add_link_then_copy)
+    with pytest.raises(BioenvError, match='Symbolic links are not allowed'):
+        import_database(config, 'tool', 'db', source=source)
+    assert not (Path(config['settings']['databases_root']) / 'tool' / 'db').exists()
+    assert (source / 'data').read_text() == 'prepared'
+    assert (source / 'late-link').is_symlink()
 
 
 def test_check_distinguishes_directory_and_file_and_optional_required(tmp_path):

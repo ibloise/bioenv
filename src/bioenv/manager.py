@@ -1,10 +1,14 @@
 """Manage stable Micromamba prefixes and explicitly declared command launchers."""
 
+import ctypes
+import errno
 import fcntl
+import hashlib
 import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -630,6 +634,68 @@ def _reject_source_symlinks(source):
                 raise BioenvError(f'Symbolic links are not allowed in import sources: {path}')
 
 
+@contextmanager
+def _database_import_lock(config, destination):
+    """Coordinate imports targeting the same managed database path."""
+    root = Path(config['settings']['databases_root']).resolve(strict=False)
+    lock_dir = root / '.bioenv-locks'
+    lock_name = hashlib.sha256(os.fsencode(destination)).hexdigest() + '.lock'
+    lock_path = lock_dir / lock_name
+    if lock_dir.is_symlink() or lock_path.is_symlink():
+        raise BioenvError(f'Refusing to use database lock path through a symlink: {lock_path}')
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        lock_dir.mkdir(exist_ok=True)
+        stream = lock_path.open('a', encoding='utf-8')
+    except OSError as exc:
+        raise BioenvError(f'Cannot lock database import for {destination}: {exc}') from exc
+    with stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise BioenvError(
+                f'Cannot lock database import for {destination}: {exc}'
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _publish_no_replace(staged, destination):
+    """Atomically publish a same-filesystem staged path without replacing any entry."""
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
+    if renameat2 is None:
+        raise BioenvError('Atomic no-overwrite publication requires Linux renameat2 support')
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                          ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(staged), -100, os.fsencode(destination), 1)
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise BioenvError(f'Database destination already exists: {destination}')
+    raise OSError(error, os.strerror(error), destination)
+
+
+def _copy_file_no_follow(source, staged):
+    """Copy one regular file from an opened, non-symlink source inode."""
+    fd = os.open(source, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise BioenvError(f'Import source must remain a regular file: {source}')
+        with os.fdopen(fd, 'rb') as source_stream:
+            fd = -1
+            with staged.open('wb') as destination_stream:
+                shutil.copyfileobj(source_stream, destination_stream)
+        os.chmod(staged, stat.S_IMODE(metadata.st_mode))
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def database_import_plan(config, tool, database_name, file=None, source=None):
     database = _database_spec(config, tool, database_name)
     if (file is None) == (source is None):
@@ -671,28 +737,33 @@ def import_database(config, tool, database_name, file=None, source=None, dry_run
     plan = database_import_plan(config, tool, database_name, file=file, source=source)
     if dry_run:
         return plan
-    destination = plan['path']
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        # Revalidate after parent creation to catch symlinked paths introduced meanwhile.
+    with _database_import_lock(config, plan['path']):
+        # Revalidate after locking and after creating parents to catch conflicts and path changes.
         plan = database_import_plan(config, tool, database_name, file=file, source=source)
         destination = plan['path']
-        if plan['type'] == 'directory':
-            with tempfile.TemporaryDirectory(prefix='.bioenv-import-', dir=destination.parent) as temp:
-                staged = Path(temp) / 'payload'
-                shutil.copytree(plan['source'], staged, symlinks=False)
-                os.replace(staged, destination)
-        else:
-            fd, temp_name = tempfile.mkstemp(prefix='.bioenv-import-', dir=destination.parent)
-            os.close(fd)
-            staged = Path(temp_name)
-            try:
-                shutil.copy2(plan['source'], staged)
-                os.replace(staged, destination)
-            finally:
-                staged.unlink(missing_ok=True)
-    except BioenvError:
-        raise
-    except OSError as exc:
-        raise BioenvError(f'Could not import database to {destination}: {exc}') from exc
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            plan = database_import_plan(config, tool, database_name, file=file, source=source)
+            destination = plan['path']
+            if plan['type'] == 'directory':
+                with tempfile.TemporaryDirectory(
+                    prefix='.bioenv-import-', dir=destination.parent
+                ) as temp:
+                    staged = Path(temp) / 'payload'
+                    shutil.copytree(plan['source'], staged, symlinks=True)
+                    _reject_source_symlinks(staged)
+                    _publish_no_replace(staged, destination)
+            else:
+                fd, temp_name = tempfile.mkstemp(prefix='.bioenv-import-', dir=destination.parent)
+                os.close(fd)
+                staged = Path(temp_name)
+                try:
+                    _copy_file_no_follow(plan['source'], staged)
+                    _publish_no_replace(staged, destination)
+                finally:
+                    staged.unlink(missing_ok=True)
+        except BioenvError:
+            raise
+        except (OSError, shutil.Error) as exc:
+            raise BioenvError(f'Could not import database to {destination}: {exc}') from exc
     return plan

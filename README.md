@@ -71,8 +71,15 @@ The default type is `directory`; use `type: file` for a single file, whose confi
 is its final filename. Each declared `env` is exported by published launchers. Bioenv copies
 prepared input without unpacking or interpreting it, refuses occupied destinations and paths
 outside the managed root, and never changes the source. Symbolic links are rejected both as
-the source and anywhere inside a source directory. Bioenv checks only existence, type and
-accessibility; it does not guarantee that a database is biologically valid or usable.
+the source and anywhere inside a source directory. Imports of the same catalog entry are
+serialized with a lock under `databases_root`; final publication uses Linux `renameat2` with
+no-replace semantics, so even a process that ignores the Bioenv lock cannot make an import
+overwrite an occupied destination. A directory import is staged on the destination filesystem
+and checked again for links before publication. Keep source directories unchanged during an
+import: standard-library tree copying cannot provide a filesystem snapshot or eliminate every
+race with a process changing directory entries, so concurrent changes may yield a mixed copy
+or evade link checks. Bioenv checks only existence, type and accessibility; it does not
+guarantee that a database is biologically valid or usable.
 
 For Kraken2, build the database yourself with Kraken2's tools in a staging directory, then
 import that prepared directory and check its configured location:
