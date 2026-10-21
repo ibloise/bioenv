@@ -139,16 +139,49 @@ def test_import_rejects_inaccessible_source(tmp_path, monkeypatch):
         import_database(config, 'tool', 'db', source=source)
 
 
-def test_import_rejects_symlinks_in_source_tree(tmp_path):
+def test_import_preserves_relative_internal_symlink(tmp_path):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    (source / 'versions' / 'v1').mkdir(parents=True)
+    (source / 'versions' / 'v1' / 'db').write_text('database')
+    (source / 'latest').symlink_to(Path('versions/v1'), target_is_directory=True)
+    import_database(config, 'tool', 'db', source=source)
+    imported = tmp_path / 'databases' / 'tool' / 'db'
+    assert (imported / 'latest').is_symlink()
+    assert imported.joinpath('latest').readlink() == Path('versions/v1')
+    assert (imported / 'latest' / 'db').read_text() == 'database'
+    assert (source / 'latest').is_symlink()
+
+
+def test_import_rejects_external_symlink(tmp_path):
     _, config = make_config(tmp_path)
     source = tmp_path / 'source'
     source.mkdir()
     outside = tmp_path / 'outside'
     outside.write_text('outside')
-    (source / 'link').symlink_to(outside)
-    with pytest.raises(BioenvError, match='Symbolic links are not allowed'):
+    (source / 'link').symlink_to(Path('../outside'))
+    with pytest.raises(BioenvError, match='outside the import source'):
         import_database(config, 'tool', 'db', source=source)
     assert not (tmp_path / 'databases' / 'tool' / 'db').exists()
+
+
+def test_import_rejects_broken_symlink(tmp_path):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'broken').symlink_to(Path('missing'))
+    with pytest.raises(BioenvError, match='Broken or cyclic'):
+        import_database(config, 'tool', 'db', source=source)
+
+
+def test_import_rejects_cyclic_symlinks(tmp_path):
+    _, config = make_config(tmp_path)
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'first').symlink_to(Path('second'))
+    (source / 'second').symlink_to(Path('first'))
+    with pytest.raises(BioenvError, match='Broken or cyclic'):
+        import_database(config, 'tool', 'db', source=source)
 
 
 def test_import_rejects_source_root_symlink(tmp_path):
@@ -157,7 +190,7 @@ def test_import_rejects_source_root_symlink(tmp_path):
     source.mkdir()
     link = tmp_path / 'link'
     link.symlink_to(source, target_is_directory=True)
-    with pytest.raises(BioenvError, match='Symbolic links are not allowed'):
+    with pytest.raises(BioenvError, match='Symbolic links are not allowed as import sources'):
         import_database(config, 'tool', 'db', source=link)
 
 
@@ -281,11 +314,11 @@ def test_import_rejects_symlink_added_while_copying(tmp_path, monkeypatch):
     real_copytree = shutil.copytree
 
     def add_link_then_copy(origin, staged, **kwargs):
-        (Path(origin) / 'late-link').symlink_to(outside)
+        (Path(origin) / 'late-link').symlink_to(Path('../outside'))
         return real_copytree(origin, staged, **kwargs)
 
     monkeypatch.setattr('bioenv.manager.shutil.copytree', add_link_then_copy)
-    with pytest.raises(BioenvError, match='Symbolic links are not allowed'):
+    with pytest.raises(BioenvError, match='Broken or cyclic'):
         import_database(config, 'tool', 'db', source=source)
     assert not (Path(config['settings']['databases_root']) / 'tool' / 'db').exists()
     assert (source / 'data').read_text() == 'prepared'

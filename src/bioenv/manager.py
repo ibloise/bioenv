@@ -625,13 +625,26 @@ def check_database(config, tool, database_name):
     return _database_check(config, tool, database)
 
 
-def _reject_source_symlinks(source):
+def _validate_source_symlinks(source):
+    """Allow only relative links that resolve within the imported directory tree."""
     if source.is_symlink():
-        raise BioenvError(f'Symbolic links are not allowed in import sources: {source}')
-    if source.is_dir():
-        for path in source.rglob('*'):
-            if path.is_symlink():
-                raise BioenvError(f'Symbolic links are not allowed in import sources: {path}')
+        raise BioenvError(f'Symbolic links are not allowed as import sources: {source}')
+    root = source.resolve(strict=True)
+    if not source.is_dir():
+        return
+    for path in source.rglob('*'):
+        if not path.is_symlink():
+            continue
+        target = Path(os.readlink(path))
+        if target.is_absolute():
+            raise BioenvError(f'Absolute symbolic links are not allowed in import sources: {path}')
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise BioenvError(f'Symbolic link points outside the import source: {path}') from exc
+        except (OSError, RuntimeError) as exc:
+            raise BioenvError(f'Broken or cyclic symbolic link in import source: {path}') from exc
 
 
 @contextmanager
@@ -713,7 +726,7 @@ def database_import_plan(config, tool, database_name, file=None, source=None):
     access = os.R_OK | (os.X_OK if expected_origin == 'directory' else 0)
     if not os.access(origin, access):
         raise BioenvError(f'Import source is not accessible: {origin}')
-    _reject_source_symlinks(origin)
+    _validate_source_symlinks(origin)
     if (kind == 'file') != (file is not None):
         option = '--file' if kind == 'file' else '--source'
         raise BioenvError(f'Database {database_name!r} is configured as a {kind}; use {option}')
@@ -751,7 +764,7 @@ def import_database(config, tool, database_name, file=None, source=None, dry_run
                 ) as temp:
                     staged = Path(temp) / 'payload'
                     shutil.copytree(plan['source'], staged, symlinks=True)
-                    _reject_source_symlinks(staged)
+                    _validate_source_symlinks(staged)
                     _publish_no_replace(staged, destination)
             else:
                 fd, temp_name = tempfile.mkstemp(prefix='.bioenv-import-', dir=destination.parent)

@@ -70,8 +70,9 @@ Database paths use the per-tool catalog. Relative `path` values resolve beneath
 The default type is `directory`; use `type: file` for a single file, whose configured `path`
 is its final filename. Each declared `env` is exported by published launchers. Bioenv copies
 prepared input without unpacking or interpreting it, refuses occupied destinations and paths
-outside the managed root, and never changes the source. Symbolic links are rejected both as
-the source and anywhere inside a source directory. Imports of the same catalog entry are
+outside the managed root, and never changes the source. Inside a directory source, relative
+symbolic links are preserved when they resolve within the source tree; absolute, external,
+broken and cyclic links are rejected. Imports of the same catalog entry are
 serialized with a lock under `databases_root`; final publication uses Linux `renameat2` with
 no-replace semantics, so even a process that ignores the Bioenv lock cannot make an import
 overwrite an occupied destination. A directory import is staged on the destination filesystem
