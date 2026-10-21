@@ -25,9 +25,21 @@ bioenv --config config/tools.example.yaml install bakta --dry-run
 For the corporate proxy, use the already-configured system trust bundle and proxy
 environment before running `pip`, if needed.
 
+```bash
+bioenv list
+bioenv list --simple
+bioenv info bakta
+```
+
 ## Available operations
 
-- `bioenv list`, `bioenv info TOOL`, and `bioenv validate` inspect the catalog.
+- `bioenv list` shows installed package versions, installation status and public commands.
+  `Installed` means the environment, declared executables and launchers are present and
+  current; `Incomplete` means an existing environment is missing one of them; `Missing` means
+  no environment is installed. Database availability does not affect this status.
+- `bioenv list --simple` prints sorted tool identifiers, one per line, for scripts.
+- `bioenv info TOOL` shows tool status, installed/requested versions, launchers and database
+  availability. `bioenv validate` inspects the catalog.
 - `bioenv inspect TOOL` lists executable files in the tool environment's `bin` directory.
 - `bioenv check TOOL` verifies the environment, current managed launchers, and configured
   databases. Missing optional databases pass; missing required databases fail.

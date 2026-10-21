@@ -15,15 +15,32 @@ from bioenv.manager import (
     check,
     check_database,
     command_map,
+    database_status,
     import_database,
     install,
+    installation_status,
     paths,
     plan_update,
     publish,
+    read_installed_version,
     remove,
     remove_plan,
     update,
 )
+
+
+def _format_table(headers, rows):
+    widths = [max([len(header), *(len(row[index]) for row in rows)])
+              for index, header in enumerate(headers)]
+    lines = [
+        '  '.join(header.ljust(widths[index]) for index, header in enumerate(headers)),
+        '  '.join('─' * width for width in widths),
+    ]
+    lines.extend(
+        '  '.join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip()
+        for row in rows
+    )
+    return '\n'.join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
         help='YAML catalog path',
     )
     commands = parser.add_subparsers(dest='command', required=True)
-    commands.add_parser('list', help='List tools declared in catalog')
+    list_parser = commands.add_parser('list', help='List tools declared in catalog')
+    list_parser.add_argument('--simple', action='store_true', help='Print only tool identifiers')
     for name, help_text in (
         ('info', 'Show tool configuration and paths'),
         ('inspect', 'List executable files in tool environment/bin'),
@@ -83,8 +101,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f'OK: {len(tools)} tool(s) declared in {args.config}')
             return 0
         if args.command == 'list':
+            if args.simple:
+                for name in sorted(tools):
+                    print(name)
+                return 0
+            rows = []
             for name, spec in sorted(tools.items()):
-                print(f"{name}\t{spec['package']}\t{', '.join(command_map(spec))}")
+                status, _ = installation_status(config, name)
+                version = read_installed_version(config, name) or '—'
+                rows.append((name, version, status, ', '.join(command_map(spec))))
+            print(_format_table(('TOOL', 'VERSION', 'STATUS', 'COMMANDS'), rows))
             return 0
         if args.command == 'db':
             if args.tool not in tools:
@@ -112,19 +138,36 @@ def main(argv: list[str] | None = None) -> int:
         spec = tools[tool]
         prefix, bin_dir = paths(config, tool)
         if args.command == 'info':
-            print(f"Tool: {tool}\nPackage: {spec['package']}\nEnvironment: {prefix}")
-            if 'version' in spec:
-                print(f"Version requested: {spec['version']}")
-            if 'python' in spec:
-                print(f"Python requested: {spec['python']}")
+            status, _ = installation_status(config, tool)
+            version = read_installed_version(config, tool)
+            print(f'Tool:         {tool}')
+            print(f'Package:      {spec["package"]}')
+            print(f'Version:      {version or "—"}')
+            requested = spec.get('version')
+            if requested and requested != version:
+                print(f'Requested:    {requested}')
+            print(f'Status:       {status}')
+            print(f'Environment:  {prefix}')
             commands = command_map(spec)
-            print(f"Commands: {', '.join(commands)}\nLaunchers: {bin_dir}")
-            aliases = [f'{public} -> {executable}' for public, executable in commands.items()
-                       if public != executable]
-            if aliases:
-                print(f"Executable aliases: {', '.join(aliases)}")
+            print('\nCommands:')
+            for public, executable in commands.items():
+                suffix = f' (executable: {executable})' if public != executable else ''
+                print(f'  {public}{suffix}')
+            print(f'\nLaunchers:    {bin_dir}')
+            databases = spec.get('databases', [])
+            print('\nDatabases:')
+            if databases:
+                has_default = any(database.get('env') for database in databases)
+                db_rows = []
+                for database in databases:
+                    db_status, db_path = database_status(config, database)
+                    default = 'Yes' if database.get('env') else ('No' if has_default else '—')
+                    db_rows.append((database['name'], db_status, default, str(db_path)))
+                print(_format_table(('NAME', 'STATUS', 'DEFAULT', 'PATH'), db_rows))
+            else:
+                print('  None declared')
             for key, value in spec.get('environment', {}).items():
-                print(f'Environment: {key}={value}')
+                print(f'Environment variable: {key}={value}')
         elif args.command == 'inspect':
             bindir = prefix / ENVIRONMENT_BIN
             if not bindir.is_dir():

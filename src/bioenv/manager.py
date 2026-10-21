@@ -137,7 +137,7 @@ def _current_launcher(path, tool, command, executable, config):
         return False
     try:
         return path.read_text(encoding='utf-8') == _wrapper(tool, command, executable, config)
-    except (OSError, UnicodeError):
+    except (BioenvError, OSError, UnicodeError):
         return False
 
 
@@ -588,7 +588,7 @@ def _write_launcher(dest, content, replace):
                 pass
 
 
-def check(config, tool):
+def _environment_checks(config, tool):
     prefix, bin_dir = paths(config, tool)
     result = []
     environment_ok = prefix.is_dir() and not prefix.is_symlink()
@@ -600,23 +600,65 @@ def check(config, tool):
         dest = bin_dir / command
         launcher_ok = _current_launcher(dest, tool, command, executable, config)
         result.append((launcher_ok, f'Current executable launcher: {dest}'))
+    return result
+
+
+def installation_status(config, tool):
+    """Return the installation state and its environment/launcher check results."""
+    prefix, _ = paths(config, tool)
+    results = _environment_checks(config, tool)
+    if not prefix.exists() and not prefix.is_symlink():
+        return 'Missing', results
+    return ('Installed' if all(ok for ok, _ in results) else 'Incomplete'), results
+
+
+def read_installed_version(config, tool):
+    """Read the installed package version from Conda metadata, if available."""
+    prefix, _ = paths(config, tool)
+    if prefix.is_symlink() or not prefix.is_dir():
+        return None
+    try:
+        return _conda_package_version(prefix, config['tools'][tool]['package'])
+    except BioenvError:
+        return None
+
+
+def check(config, tool):
+    result = _environment_checks(config, tool)
     for database in config['tools'][tool].get('databases', []):
         result.append(_database_check(config, tool, database))
     return result
 
 
-def _database_check(config, tool, database):
-    db_path = _resolved_database_path(config, database)
+def database_status(config, database):
+    try:
+        db_path = _resolved_database_path(config, database)
+    except BioenvError:
+        configured = Path(database['path'])
+        if not configured.is_absolute():
+            configured = Path(config['settings'].get('databases_root', '/')) / configured
+        return 'Invalid', configured
     kind = database.get('type', 'directory')
     exists = db_path.is_file() if kind == 'file' else db_path.is_dir()
-    required = database.get('required', False)
-    readable = exists and os.access(db_path, os.R_OK | (0 if kind == 'file' else os.X_OK))
     path_exists = db_path.exists() or db_path.is_symlink()
-    ok = readable or (not required and not path_exists)
+    if not path_exists:
+        return 'Missing', db_path
+    if not exists:
+        return 'Invalid', db_path
+    access = os.R_OK | (os.X_OK if kind == 'directory' else 0)
+    if not os.access(db_path, access):
+        return 'Invalid', db_path
+    return 'Available', db_path
+
+
+def _database_check(config, tool, database):
+    status, db_path = database_status(config, database)
+    required = database.get('required', False)
+    ok = status == 'Available' or (status == 'Missing' and not required)
     state = 'required database' if required else 'optional database'
-    detail = 'available' if readable else (
-        'not installed' if not path_exists else ('wrong type' if not exists else 'not accessible')
-    )
+    detail = {'Available': 'available', 'Missing': 'not installed', 'Invalid': 'not accessible'}[
+        status
+    ]
     return ok, f'{state} {database["name"]} {detail}: {db_path}'
 
 
