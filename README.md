@@ -29,6 +29,11 @@ environment before running `pip`, if needed.
 bioenv list
 bioenv list --simple
 bioenv info bakta
+bioenv config path
+bioenv config edit
+bioenv config edit --editor vim
+sudoedit "$(bioenv config path)"
+bioenv validate
 ```
 
 ## Available operations
@@ -40,6 +45,10 @@ bioenv info bakta
 - `bioenv list --simple` prints sorted tool identifiers, one per line, for scripts.
 - `bioenv info TOOL` shows tool status, installed/requested versions, launchers and database
   availability. `bioenv validate` inspects the catalog.
+- `bioenv config path` prints the active catalog path; `bioenv config edit` opens it in
+  `$VISUAL`, `$EDITOR` or `nano` and validates it after the editor closes. Bioenv does not
+  manage permissions or revert invalid edits. Use Linux administrative mechanisms for the
+  production catalog; `sudoedit "$(bioenv config path)"` is recommended for protected files.
 - `bioenv inspect TOOL` lists executable files in the tool environment's `bin` directory.
 - `bioenv check TOOL` verifies the environment, current managed launchers, and configured
   databases. Missing optional databases pass; missing required databases fail.

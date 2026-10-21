@@ -3,6 +3,7 @@
 import argparse
 import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -41,6 +42,34 @@ def _format_table(headers, rows):
         for row in rows
     )
     return '\n'.join(lines)
+
+
+def _config_path(path):
+    return path.expanduser().resolve()
+
+
+def _edit_config(path, editor):
+    path = _config_path(path)
+    editable_path = path if path.exists() else path.parent
+    if not os.access(editable_path, os.W_OK):
+        raise BioenvError(
+            f'Catalog is not writable by this user: {path}. '
+            f'Use `sudoedit {shlex.quote(str(path))}` to edit the protected catalog.'
+        )
+
+    try:
+        command = shlex.split(editor)
+    except ValueError as exc:
+        raise BioenvError(f'Invalid editor command: {exc}') from exc
+    if not command:
+        raise BioenvError('Editor command is empty')
+    try:
+        result = subprocess.run([*command, str(path)], check=False)
+    except OSError as exc:
+        raise BioenvError(f'Cannot run editor {command[0]!r}: {exc}') from exc
+    if result.returncode:
+        raise BioenvError(f'Editor {command[0]!r} exited with status {result.returncode}')
+    return path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,12 +118,34 @@ def build_parser() -> argparse.ArgumentParser:
     db_check.add_argument('tool', help='Tool identifier from catalog')
     db_check.add_argument('database', help='Database name from catalog')
     commands.add_parser('validate', help='Validate YAML catalog')
+    config_parser = commands.add_parser('config', help='Locate or edit the YAML catalog')
+    config_commands = config_parser.add_subparsers(dest='config_command', required=True)
+    config_commands.add_parser('path', help='Print the active catalog path')
+    config_edit = config_commands.add_parser('edit', help='Edit and validate the active catalog')
+    config_edit.add_argument('--editor', help='Editor command (may include arguments)')
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == 'config':
+            path = _config_path(args.config)
+            if args.config_command == 'path':
+                print(path)
+                return 0
+            editor = (
+                args.editor if args.editor is not None else
+                os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'nano'
+            )
+            path = _edit_config(path, editor)
+            try:
+                config = load_config(path)
+            except ConfigError as exc:
+                print(f'Catalog validation failed:\n{exc}', file=sys.stderr)
+                return 1
+            print(f'Catalog validation: OK ({len(config["tools"])} tools declared)')
+            return 0
         config = load_config(args.config)
         tools = config['tools']
         if args.command == 'validate':
