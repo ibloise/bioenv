@@ -72,6 +72,100 @@ def _edit_config(path, editor):
     return path
 
 
+def _positive_integer(value):
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('must be a positive integer') from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return number
+
+
+def _tool_inventory(config, tools, names):
+    rows = {}
+    for name in names:
+        status, _ = installation_status(config, name)
+        version = read_installed_version(config, name) or '—'
+        rows[name] = (name, version, status, ', '.join(command_map(tools[name])))
+    return rows
+
+
+def _print_tool_group(title, rows):
+    print(title)
+    print(_format_table(('TOOL', 'VERSION', 'STATUS', 'COMMANDS'), rows))
+
+
+def _install_pending(config, tools, category, limit, dry_run):
+    names = [
+        name for name, spec in sorted(tools.items())
+        if category is None or category in spec.get('categories', [])
+    ]
+    states = {name: installation_status(config, name)[0] for name in names}
+    pending = [name for name in names if states[name] == 'Missing']
+    present = [name for name in names if states[name] != 'Missing']
+    selected = pending if limit is None else pending[:limit]
+    deferred = pending[len(selected):]
+
+    if dry_run:
+        selected_set = set(selected)
+        deferred_set = set(deferred)
+        rows = [
+            (name, tools[name]['package'], states[name],
+             'Install' if name in selected_set else
+             'Defer' if name in deferred_set else 'Skip')
+            for name in names
+        ]
+        print('INSTALLATION PLAN\n')
+        print(_format_table(('TOOL', 'PACKAGE', 'STATUS', 'ACTION'), rows))
+        print(f'\nPending installations: {len(selected)}')
+        print(f'Already present:      {len(present)}')
+        print(f'Deferred by limit:     {len(deferred)}')
+        incomplete = [name for name in present if states[name] == 'Incomplete']
+        if incomplete:
+            print('Incomplete environments need administrative review: ' + ', '.join(incomplete))
+        return 0
+    if not selected:
+        print('No pending tools.')
+        incomplete = [name for name in present if states[name] == 'Incomplete']
+        if incomplete:
+            print('Incomplete environments need administrative review: ' + ', '.join(incomplete))
+        return 0
+
+    print(f'Installing {len(selected)} pending tool(s)...')
+    installed = []
+    failed = []
+    for index, name in enumerate(selected, start=1):
+        print(f'[{index}/{len(selected)}] {name} ', end='', flush=True)
+        try:
+            install(config, name)
+        except BioenvError as exc:
+            failed.append((name, str(exc)))
+            print(f'FAILED: {exc}')
+        except OSError as exc:
+            failed.append((name, str(exc)))
+            print(f'FAILED: {exc}')
+        else:
+            installed.append(name)
+            print('OK')
+
+    print('\nSUMMARY')
+    print(f'  Installed: {len(installed)}')
+    print(f'  Failed:    {len(failed)}')
+    print(f'  Skipped:   {len(present)}')
+    print(f'  Deferred:  {len(deferred)}')
+    if failed:
+        print('Failed tools: ' + ', '.join(name for name, _ in failed))
+        for name, reason in failed:
+            print(f'  {name}: {reason}', file=sys.stderr)
+    if deferred:
+        print('Pending tools not processed by --limit: ' + ', '.join(deferred))
+    if any(states[name] == 'Incomplete' for name in present):
+        incomplete = [name for name in present if states[name] == 'Incomplete']
+        print('Incomplete environments need administrative review: ' + ', '.join(incomplete))
+    return 1 if failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='bioenv', description='Manage shared Micromamba bioinformatics environments.'
@@ -84,11 +178,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest='command', required=True)
     list_parser = commands.add_parser('list', help='List tools declared in catalog')
     list_parser.add_argument('--simple', action='store_true', help='Print only tool identifiers')
+    list_parser.add_argument('--category', help='Show tools in this category')
+    list_parser.add_argument('--group-by', choices=('category',), help='Group tools by category')
     for name, help_text in (
         ('info', 'Show tool configuration and paths'),
         ('inspect', 'List executable files in tool environment/bin'),
         ('check', 'Check environment, launchers and databases'),
-        ('install', 'Create environment and publish selected commands'),
         ('update', 'Update an installed tool in place'),
         ('publish', 'Publish commands from an existing environment'),
         ('remove', 'Remove a tool environment and its managed launchers'),
@@ -105,6 +200,13 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument('--launchers-only', action='store_true',
                              help='Remove launchers while keeping the environment')
             sub.add_argument('--yes', action='store_true', help='Skip confirmation prompt')
+    install_parser = commands.add_parser('install', help='Install one tool or pending tools')
+    install_parser.add_argument('tool', nargs='?', help='Tool identifier from catalog')
+    install_parser.add_argument('--dry-run', action='store_true', help='Show actions without changes')
+    install_parser.add_argument('--pending', action='store_true', help='Install missing environments')
+    install_parser.add_argument('--category', help='Limit pending tools to this category')
+    install_parser.add_argument('--limit', type=_positive_integer,
+                                help='Maximum pending tools to install in this batch')
     db = commands.add_parser('db', help='Import or check a declared database')
     db_commands = db.add_subparsers(dest='db_command', required=True)
     db_import = db_commands.add_parser('import', help='Copy a prepared database into storage')
@@ -118,6 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_check.add_argument('tool', help='Tool identifier from catalog')
     db_check.add_argument('database', help='Database name from catalog')
     commands.add_parser('validate', help='Validate YAML catalog')
+    commands.add_parser('categories', help='List declared tool categories')
     config_parser = commands.add_parser('config', help='Locate or edit the YAML catalog')
     config_commands = config_parser.add_subparsers(dest='config_command', required=True)
     config_commands.add_parser('path', help='Print the active catalog path')
@@ -129,6 +232,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == 'install':
+            if not args.pending and (args.category is not None or args.limit is not None):
+                raise BioenvError('--category and --limit require --pending')
+            if args.pending and args.tool:
+                raise BioenvError('Do not combine TOOL with --pending')
+            if not args.pending and not args.tool:
+                raise BioenvError('install requires TOOL or --pending')
         if args.command == 'config':
             path = _config_path(args.config)
             if args.config_command == 'path':
@@ -151,17 +261,56 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'validate':
             print(f'OK: {len(tools)} tool(s) declared in {args.config}')
             return 0
+        if args.command == 'categories':
+            counts = {}
+            for spec in tools.values():
+                for category in spec.get('categories', []):
+                    counts[category] = counts.get(category, 0) + 1
+            rows = [(category, str(count)) for category, count in sorted(counts.items())]
+            if rows:
+                print(_format_table(('CATEGORY', 'TOOLS'), rows))
+            else:
+                print('No categories declared.')
+            return 0
         if args.command == 'list':
+            names = [
+                name for name, spec in sorted(tools.items())
+                if args.category is None or args.category in spec.get('categories', [])
+            ]
             if args.simple:
-                for name in sorted(tools):
+                for name in names:
                     print(name)
                 return 0
-            rows = []
-            for name, spec in sorted(tools.items()):
-                status, _ = installation_status(config, name)
-                version = read_installed_version(config, name) or '—'
-                rows.append((name, version, status, ', '.join(command_map(spec))))
-            print(_format_table(('TOOL', 'VERSION', 'STATUS', 'COMMANDS'), rows))
+            if not names:
+                print(f'No tools found in category: {args.category}' if args.category else
+                      'No tools declared.')
+                return 0
+            tool_rows = _tool_inventory(config, tools, names)
+            if args.group_by == 'category':
+                if args.category is not None:
+                    groups = [(args.category, names)]
+                else:
+                    category_names = sorted({
+                        category for name in names
+                        for category in tools[name].get('categories', [])
+                    })
+                    groups = [
+                        (category, [name for name in names
+                                    if category in tools[name].get('categories', [])])
+                        for category in category_names
+                    ]
+                    uncategorized = [
+                        name for name in names if not tools[name].get('categories', [])
+                    ]
+                    if uncategorized:
+                        groups.append(('UNCATEGORIZED', uncategorized))
+                for index, (category, group_names) in enumerate(groups):
+                    if index:
+                        print()
+                    _print_tool_group(category.upper(), [tool_rows[name] for name in group_names])
+                return 0
+            print(_format_table(('TOOL', 'VERSION', 'STATUS', 'COMMANDS'),
+                                [tool_rows[name] for name in names]))
             return 0
         if args.command == 'db':
             if args.tool not in tools:
@@ -183,6 +332,10 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f'Imported database {args.database} for {args.tool} to {plan["path"]}')
             return 0
+        if args.command == 'install' and args.pending:
+            return _install_pending(
+                config, tools, args.category, args.limit, args.dry_run
+            )
         if args.tool not in tools:
             raise ConfigError(f'Unknown tool: {args.tool}')
         tool = args.tool
@@ -199,6 +352,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f'Requested:    {requested}')
             print(f'Status:       {status}')
             print(f'Environment:  {prefix}')
+            categories = spec.get('categories', [])
+            if categories:
+                print(f'Categories:   {", ".join(categories)}')
             commands = command_map(spec)
             print('\nCommands:')
             for public, executable in commands.items():

@@ -10,6 +10,8 @@ settings:
 tools:
   bakta:
     package: bakta
+    categories:
+      - amr
     version: "1.12.1"
     python: "3.12"
     commands:
@@ -23,12 +25,16 @@ tools:
 
   spades:
     package: spades
+    categories:
+      - assembly
     commands:
       spades: spades.py
       spades.py: spades.py
 
   kraken2:
     package: kraken2
+    categories:
+      - classification
     commands:
       - kraken2
       - kraken2-build

@@ -15,7 +15,9 @@ DEFAULT_SETTINGS = {
     'mamba_root': '/opt/bioinformatics',
 }
 SETTING_KEYS = {*DEFAULT_SETTINGS, 'databases_root'}
-TOOL_KEYS = {'package', 'python', 'version', 'commands', 'environment', 'databases'}
+TOOL_KEYS = {
+    'package', 'python', 'version', 'commands', 'environment', 'databases', 'categories',
+}
 DATABASE_KEYS = {'name', 'path', 'env', 'required', 'type'}
 
 
@@ -198,6 +200,13 @@ def _validate_tool(name, value, claimed_commands, databases_root):
     for key in ('python', 'version'):
         if key in spec and (not isinstance(spec[key], str) or not spec[key]):
             raise ConfigError(f'Tool {name!r}: {key} must be a quoted string')
+    categories = spec.get('categories', [])
+    if not isinstance(categories, list) or any(
+        not isinstance(category, str) or not category.strip() for category in categories
+    ):
+        raise ConfigError(f'Tool {name!r}: categories must be a list of non-empty strings')
+    if len(set(categories)) != len(categories):
+        raise ConfigError(f'Tool {name!r}: duplicate category')
 
     _validate_commands(name, spec.get('commands'), claimed_commands)
     environment = spec.get('environment', {})

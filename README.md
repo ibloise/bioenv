@@ -34,6 +34,12 @@ bioenv config edit
 bioenv config edit --editor vim
 sudoedit "$(bioenv config path)"
 bioenv validate
+bioenv categories
+bioenv list --category assembly
+bioenv list --group-by category
+bioenv install --pending --dry-run
+bioenv install --pending --category assembly
+bioenv install --pending --limit 10
 ```
 
 ## Available operations
@@ -43,6 +49,10 @@ bioenv validate
   current; `Incomplete` means an existing environment is missing one of them; `Missing` means
   no environment is installed. Database availability does not affect this status.
 - `bioenv list --simple` prints sorted tool identifiers, one per line, for scripts.
+- `bioenv list --category CATEGORY` filters by an exact category; `--group-by category`
+  groups tools alphabetically. `bioenv categories` lists declared categories and tool counts.
+  Categories are optional YAML metadata, do not affect environments, and tools may have more
+  than one.
 - `bioenv info TOOL` shows tool status, installed/requested versions, launchers and database
   availability. `bioenv validate` inspects the catalog.
 - `bioenv config path` prints the active catalog path; `bioenv config edit` opens it in
@@ -53,6 +63,10 @@ bioenv validate
 - `bioenv check TOOL` verifies the environment, current managed launchers, and configured
   databases. Missing optional databases pass; missing required databases fail.
 - `bioenv install TOOL` creates the environment and publishes only declared commands.
+- `bioenv install --pending` installs only tools whose environments are missing. Existing or
+  incomplete environments are skipped, never repaired or overwritten. Installations run
+  sequentially and the batch continues after individual failures. Review large batches with
+  `--dry-run` first; `--category` filters the batch and `--limit` caps each batch.
 - `bioenv update TOOL` updates the installed package to the catalog version, or asks
   Micromamba to resolve it without an explicit package version when none is declared.
 - `bioenv update TOOL --latest` ignores the catalog package version pin for this operation
